@@ -94,11 +94,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 			log.Printf("parse request: %v", err)
 			return
 		}
+		log.Printf("received api=%d version=%d correlation=%d", header.APIKey, header.APIVersion, header.CorrelationID)
 
 		respPayload, err := s.Handler.Handle(ctx, header, req)
 		if err != nil {
 			log.Printf("handle request api=%d err=%v", header.APIKey, err)
 			return
+		}
+		if respPayload != nil {
+			log.Printf("sending response api=%d size=%d", header.APIKey, len(respPayload))
 		}
 		if respPayload == nil {
 			continue

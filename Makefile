@@ -18,13 +18,16 @@ test: ## Run unit tests
 
 docker-build: docker-build-broker docker-build-operator docker-build-console ## Build all container images
 
-docker-build-broker: ## Build broker container image
+BROKER_SRCS := $(shell find cmd/broker pkg go.mod go.sum)
+docker-build-broker: $(BROKER_SRCS) ## Build broker container image
 	docker build -t $(BROKER_IMAGE) -f deploy/docker/broker.Dockerfile .
 
-docker-build-operator: ## Build operator container image
+OPERATOR_SRCS := $(shell find cmd/operator pkg/operator api config go.mod go.sum)
+docker-build-operator: $(OPERATOR_SRCS) ## Build operator container image
 	docker build -t $(OPERATOR_IMAGE) -f deploy/docker/operator.Dockerfile .
 
-docker-build-console: ## Build console container image
+CONSOLE_SRCS := $(shell find cmd/console ui go.mod go.sum)
+docker-build-console: $(CONSOLE_SRCS) ## Build console container image
 	docker build -t $(CONSOLE_IMAGE) -f deploy/docker/console.Dockerfile .
 
 docker-clean: ## Remove local dev images and prune dangling Docker data

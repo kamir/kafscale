@@ -85,6 +85,39 @@ func TestHandleProduceAckZero(t *testing.T) {
 	}
 }
 
+func TestHandlerApiVersionsUnsupported(t *testing.T) {
+	store := metadata.NewInMemoryStore(defaultMetadata())
+	handler := newTestHandler(store)
+
+	header := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyApiVersion,
+		APIVersion:    1,
+		CorrelationID: 42,
+	}
+	payload, err := handler.Handle(context.Background(), header, &protocol.ApiVersionsRequest{})
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+
+	reader := bytes.NewReader(payload)
+	var (
+		corr      int32
+		errorCode int16
+	)
+	if err := binary.Read(reader, binary.BigEndian, &corr); err != nil {
+		t.Fatalf("read correlation id: %v", err)
+	}
+	if err := binary.Read(reader, binary.BigEndian, &errorCode); err != nil {
+		t.Fatalf("read error code: %v", err)
+	}
+	if corr != 42 {
+		t.Fatalf("expected correlation id 42 got %d", corr)
+	}
+	if errorCode != protocol.UNSUPPORTED_VERSION {
+		t.Fatalf("expected UNSUPPORTED_VERSION (%d) got %d", protocol.UNSUPPORTED_VERSION, errorCode)
+	}
+}
+
 func TestHandleFetch(t *testing.T) {
 	store := metadata.NewInMemoryStore(defaultMetadata())
 	handler := newTestHandler(store)
@@ -434,6 +467,35 @@ func TestFetchBackpressureUnavailable(t *testing.T) {
 	}
 }
 
+func TestStartupChecksSuccess(t *testing.T) {
+	store := metadata.NewInMemoryStore(defaultMetadata())
+	handler := newHandler(store, storage.NewMemoryS3Client(), protocol.MetadataBroker{NodeID: 1, Host: "localhost", Port: 19092}, testLogger())
+	if err := handler.runStartupChecks(context.Background()); err != nil {
+		t.Fatalf("expected startup checks to pass: %v", err)
+	}
+}
+
+func TestStartupChecksMetadataFailure(t *testing.T) {
+	store := failingMetadataStore{
+		Store: metadata.NewInMemoryStore(defaultMetadata()),
+		err:   errors.New("metadata offline"),
+	}
+	handler := newHandler(store, storage.NewMemoryS3Client(), protocol.MetadataBroker{NodeID: 1, Host: "localhost", Port: 19092}, testLogger())
+	err := handler.runStartupChecks(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Fatalf("expected metadata failure, got %v", err)
+	}
+}
+
+func TestStartupChecksS3Failure(t *testing.T) {
+	store := metadata.NewInMemoryStore(defaultMetadata())
+	handler := newHandler(store, &failingS3Client{}, protocol.MetadataBroker{NodeID: 1, Host: "localhost", Port: 19092}, testLogger())
+	err := handler.runStartupChecks(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "s3 readiness") {
+		t.Fatalf("expected s3 failure, got %v", err)
+	}
+}
+
 func encodeJoinMetadata(topics []string) []byte {
 	buf := make([]byte, 0)
 	writeInt16 := func(v int16) {
@@ -485,6 +547,15 @@ func (f *failingS3Client) UploadIndex(ctx context.Context, key string, body []by
 
 func (f *failingS3Client) DownloadSegment(ctx context.Context, key string, rng *storage.ByteRange) ([]byte, error) {
 	return nil, errors.New("unsupported")
+}
+
+type failingMetadataStore struct {
+	metadata.Store
+	err error
+}
+
+func (f failingMetadataStore) Metadata(ctx context.Context, topics []string) (*metadata.ClusterMetadata, error) {
+	return nil, f.err
 }
 
 func decodeProduceResponse(t *testing.T, payload []byte) *protocol.ProduceResponse {

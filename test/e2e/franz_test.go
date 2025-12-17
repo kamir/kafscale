@@ -43,10 +43,14 @@ func TestFranzGoProduceConsume(t *testing.T) {
 	brokerCmd := exec.CommandContext(ctx, "go", "run", filepath.Join(repoRoot(t), "cmd", "broker"))
 	brokerCmd.Env = append(os.Environ(),
 		"KAFSCALE_LOG_LEVEL=debug",
+		"KAFSCALE_TRACE_KAFKA=true",
 		"KAFSCALE_S3_BUCKET=kafscale-e2e",
 		"KAFSCALE_S3_REGION=us-east-1",
 		fmt.Sprintf("KAFSCALE_S3_ENDPOINT=%s", minio.Endpoint),
 		"KAFSCALE_S3_PATH_STYLE=true",
+		"AWS_ACCESS_KEY_ID=minio",
+		"AWS_SECRET_ACCESS_KEY=minio123",
+		"AWS_EC2_METADATA_DISABLED=true",
 		"KAFSCALE_AUTO_CREATE_TOPICS=true",
 		"KAFSCALE_AUTO_CREATE_PARTITIONS=1",
 		fmt.Sprintf("KAFSCALE_BROKER_ADDR=%s", brokerAddr),
@@ -54,7 +58,14 @@ func TestFranzGoProduceConsume(t *testing.T) {
 		fmt.Sprintf("KAFSCALE_CONTROL_ADDR=%s", controlAddr),
 	)
 	var brokerLogs bytes.Buffer
+	var franzLogs bytes.Buffer
 	logWriter := io.MultiWriter(&brokerLogs, os.Stdout, mustLogFile(t, "broker.log"))
+	franzLogWriter := io.MultiWriter(&franzLogs, os.Stdout, mustLogFile(t, "franz.log"))
+	newFranzLogger := func(component string) kgo.Logger {
+		return kgo.BasicLogger(franzLogWriter, kgo.LogLevelDebug, func() string {
+			return fmt.Sprintf("franz/%s ", component)
+		})
+	}
 	brokerCmd.Stdout = logWriter
 	brokerCmd.Stderr = logWriter
 	if err := brokerCmd.Start(); err != nil {
@@ -83,18 +94,21 @@ func TestFranzGoProduceConsume(t *testing.T) {
 		kgo.SeedBrokers(brokerAddr),
 		kgo.AllowAutoTopicCreation(),
 		kgo.DisableIdempotentWrite(),
+		kgo.WithLogger(newFranzLogger("producer")),
 	)
 	if err != nil {
-		t.Fatalf("create producer: %v\nlogs:\n%s", err, brokerLogs.String())
+		t.Fatalf("create producer: %v\nbroker logs:\n%s\nfranz logs:\n%s", err, brokerLogs.String(), franzLogs.String())
 	}
 	defer producer.Close()
 
 	for i := 0; i < 5; i++ {
 		t.Logf("producing record %d", i)
 		value := []byte(fmt.Sprintf("msg-%d", i))
-		if err := producer.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: value}).FirstErr(); err != nil {
-			t.Fatalf("produce %d failed: %v\nlogs:\n%s", i, err, brokerLogs.String())
+		res := producer.ProduceSync(ctx, &kgo.Record{Topic: topic, Value: value})
+		if err := res.FirstErr(); err != nil {
+			t.Fatalf("produce %d failed: %v\nbroker logs:\n%s\nfranz logs:\n%s", i, err, brokerLogs.String(), franzLogs.String())
 		}
+		t.Logf("produce %d acked", i)
 	}
 
 	t.Log("creating franz-go consumer")
@@ -103,9 +117,10 @@ func TestFranzGoProduceConsume(t *testing.T) {
 		kgo.ConsumerGroup("franz-e2e-consumer"),
 		kgo.ConsumeTopics(topic),
 		kgo.BlockRebalanceOnPoll(),
+		kgo.WithLogger(newFranzLogger("consumer")),
 	)
 	if err != nil {
-		t.Fatalf("create consumer: %v\nlogs:\n%s", err, brokerLogs.String())
+		t.Fatalf("create consumer: %v\nbroker logs:\n%s\nfranz logs:\n%s", err, brokerLogs.String(), franzLogs.String())
 	}
 	defer consumer.Close()
 
@@ -114,11 +129,11 @@ func TestFranzGoProduceConsume(t *testing.T) {
 
 	for len(received) < 5 {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for records (got %d). broker logs:\n%s", len(received), brokerLogs.String())
+			t.Fatalf("timed out waiting for records (got %d). broker logs:\n%s\nfranz logs:\n%s", len(received), brokerLogs.String(), franzLogs.String())
 		}
 		fetches := consumer.PollFetches(ctx)
 		if errs := fetches.Errors(); len(errs) > 0 {
-			t.Fatalf("fetch errors: %+v\nlogs:\n%s", errs, brokerLogs.String())
+			t.Fatalf("fetch errors: %+v\nbroker logs:\n%s\nfranz logs:\n%s", errs, brokerLogs.String(), franzLogs.String())
 		}
 		fetches.EachRecord(func(record *kgo.Record) {
 			t.Logf("consumed %s", record.Value)

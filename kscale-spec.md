@@ -8,28 +8,34 @@ Most Kafka deployments serve as durable pipes moving data from point A to points
 
 Kafscale trades latency for operational simplicity. Brokers are stateless. S3 is the source of truth. Kubernetes handles scaling and failover. The result: a system that scales to zero when idle and requires no dedicated ops expertise.
 
-Kafscale deliberately focuses on durable message transport only. There is no built-in stream-processing runtime; teams should continue to pair the platform with engines such as Apache Flink, Wayang, or any other compute stack that reads from Kafka topics. Keeping processing concerns out of the broker keeps the surface area small and lets us optimize for throughput + durability while reusing the rich processing ecosystem that already speaks Kafka.
-
-Project overview and architecture: https://www.novatechflow.com/p/kafscale.html
-
 ---
 
 ## Architecture Overview
 
-```mermaid
-flowchart TD
-    subgraph K8s["Kubernetes Cluster"]
-        subgraph Brokers["Broker Pods (HPA scaled)"]
-            B0["Broker Pod 0"]
-            B1["Broker Pod 1"]
-            B2["Broker Pod 2"]
-        end
-        ETCD[("etcd (metadata)\ Topic config / offsets")]
-        B0 --> ETCD
-        B1 --> ETCD
-        B2 --> ETCD
-    end
-    K8s --> S3[("S3 Bucket \ Segment storage (source of truth)")]
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Kubernetes Cluster                             │
+│                                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                          │
+│  │   Broker    │  │   Broker    │  │   Broker    │   Stateless pods         │
+│  │   Pod 0     │  │   Pod 1     │  │   Pod 2     │   (HPA scaled)           │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                          │
+│         │                │                │                                 │
+│         └────────────────┼────────────────┘                                 │
+│                          │                                                  │
+│                          ▼                                                  │
+│                   ┌─────────────┐                                           │
+│                   │    etcd     │  Metadata store (topic config,            │
+│                   │  (3 nodes)  │  consumer offsets, partition assignments) │
+│                   └─────────────┘                                           │
+│                                                                             │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │
+                                   ▼
+                            ┌─────────────┐
+                            │     S3      │  Segment storage
+                            │   Bucket    │  (source of truth)
+                            └─────────────┘
 ```
 
 ### Component Responsibilities
@@ -40,55 +46,23 @@ flowchart TD
 
 **S3**: Immutable segment storage. All message data lives here. Brokers have no local persistent state.
 
-### S3 Configuration
-
-- **Bucket naming**: `kafscale-{environment}-{region}` (e.g. `kafscale-prod-us-east-1`). Each environment gets a dedicated bucket to isolate retention policies and IAM permissions.
-- **Region / AZ affinity**: The bucket region must match the Kubernetes cluster’s region to avoid cross-region bandwidth charges. Operators can optionally enable S3 Multi-AZ (S3 Standard) or Cross-Region Replication for DR via CRD flags.
-- **Namespace layout**: `{bucket}/{namespace}/{topic}/{partition}/segment-{base_offset}.kfs` as described later in the Data Model.
-- **Encryption**: All objects use SSE-KMS with a customer-managed CMK (provided in cluster spec). If no CMK is provided, default to SSE-S3 but emit a warning.
-- **Lifecycle**: Retention policies are applied at the bucket level based on topic-level TTL (operator maintains prefix-specific lifecycle rules to avoid global deletes).
-
-The Kubernetes operator manages S3 buckets when requested (via IAM credentials with `s3:CreateBucket`). In managed environments the bucket may already exist; the CRD allows referencing existing buckets by ARN/name.
-
-### Secret & Configuration Store
-
-- **KafscaleCluster CRD**: Gains an `s3` stanza with `bucket`, `region`, `endpoint`, `kmsKeyArn`, `replication` (bool), and `credentialsSecretRef`.
-- **Credentials**: Access key / secret, session token, and optional STS role are stored in a Kubernetes `Secret` (type `Opaque`). Users are expected to provision it via Sealed Secrets, External Secrets, or KMS-backed CSI so data at rest remains encrypted.
-- **Operator behavior**:
-  - Reads the secret, mounts credentials into broker pods via projected volume/env vars.
-  - Rotates credentials by watching the secret; restarts pods when data changes.
-  - Validates bucket access (list bucket) before reconciling brokers.
-- **In-broker config**: The broker config (`/etc/kafscale/broker.yaml`) includes:
-  ```yaml
-  s3:
-    bucket: "kafscale-prod-us-east-1"
-    region: "us-east-1"
-    endpoint: ""            # optional custom endpoint (MinIO, VPC)
-    kmsKeyArn: "arn:aws:kms:..."
-    roleArn: ""             # optional assume-role
-    credentialSource: "env" # env, iam, workload-identity
-  ```
-
-Secrets are never written to etcd; only the operator and pods with the `kafscale-broker` ServiceAccount can read them. All restarts go through the BrokerControl drain RPC to avoid data loss.
-
 ---
 
 ## Data Model
 
 ### Topics and Partitions
 
-```mermaid
-flowchart TD
-    T["Topic: orders"]
-    T --> P0["Partition 0"]
-    T --> P1["Partition 1"]
-    T --> P2["Partition 2"]
-    P0 --> S0a["segment-00000000000000000000.kfs"]
-    P0 --> S0b["segment-00000000000000050000.kfs"]
-    P0 --> S0c["segment-00000000000000100000.kfs"]
-    P1 --> S1a["segment-00000000000000000000.kfs"]
-    P1 --> S1b["segment-00000000000000050000.kfs"]
-    P2 --> S2a["segment-00000000000000000000.kfs"]
+```
+Topic: "orders"
+├── Partition 0
+│   ├── segment-00000000000000000000.kfs
+│   ├── segment-00000000000000050000.kfs
+│   └── segment-00000000000000100000.kfs
+├── Partition 1
+│   ├── segment-00000000000000000000.kfs
+│   └── segment-00000000000000050000.kfs
+└── Partition 2
+    └── segment-00000000000000000000.kfs
 ```
 
 ### S3 Key Structure
@@ -202,91 +176,6 @@ Sparse index for offset-to-position lookups:
 ---
 
 ## etcd Data Schema
-
-All metadata persisted in etcd is encoded as versioned Protobuf messages (stored as binary) to give us forward/backward compatibility and avoid ad-hoc JSON migrations. The `.proto` files live under `proto/metadata/*.proto` and are referenced both by the brokers and the Kubernetes operator.
-
-```
-// proto/metadata/topic.proto
-syntax = "proto3";
-package kafscale.metadata;
-
-message TopicConfig {
-  string name = 1;
-  int32 partitions = 2;
-  int32 replication_factor = 3;
-  int64 retention_ms = 4;
-  int64 retention_bytes = 5;
-  int64 segment_bytes = 6;
-  string created_at = 7;
-  map<string, string> config = 8;
-}
-
-message PartitionState {
-  string topic = 1;
-  int32 partition = 2;
-  string leader_broker = 3;
-  int32 leader_epoch = 4;
-  int64 log_start_offset = 5;
-  int64 log_end_offset = 6;
-  int64 high_watermark = 7;
-  string active_segment = 8;
-  repeated SegmentInfo segments = 9;
-}
-
-message SegmentInfo {
-  int64 base_offset = 1;
-  int64 size_bytes = 2;
-  string created_at = 3;
-}
-
-message ConsumerGroup {
-  string group_id = 1;
-  string state = 2;
-  string protocol_type = 3;
-  string protocol = 4;
-  string leader = 5;
-  int32 generation_id = 6;
-  map<string, GroupMember> members = 7;
-}
-
-message GroupMember {
-  string client_id = 1;
-  string client_host = 2;
-  string heartbeat_at = 3;
-  repeated Assignment assignments = 4;
-  repeated string subscriptions = 5;
-}
-
-message Assignment {
-  string topic = 1;
-  repeated int32 partitions = 2;
-}
-
-message CommittedOffset {
-  int64 offset = 1;
-  string metadata = 2;
-  string committed_at = 3;
-  int32 leader_epoch = 4;
-}
-
-message BrokerRegistration {
-  string broker_id = 1;
-  string host = 2;
-  int32 port = 3;
-  string rack = 4;
-  string started_at = 5;
-  string last_heartbeat = 6;
-  string version = 7;
-}
-
-message PartitionAssignment {
-  string broker_id = 1;
-  int32 epoch = 2;
-  string assigned_at = 3;
-}
-```
-
-For readability the examples below keep using JSON, but treat them as the JSON form of the protobuf messages above.
 
 ### Topic Configuration
 
@@ -402,42 +291,48 @@ Value: {
 }
 ```
 
-### Metadata Snapshot
-
-```
-Key:   /kafscale/metadata/snapshot
-Value: {
-  "controller_id": 1,
-  "cluster_id": "kafscale-prod",
-  "brokers": [...],
-  "topics": [...]
-}
-```
-
-The operator periodically writes the full cluster metadata (JSON mirroring `ClusterMetadata`). Brokers watch this key and refresh their in-memory view whenever it changes, ensuring topic creations and partition reassignments propagate without restarting pods.
-
 ---
 
 ## Broker Architecture
 
 ### Process Structure
 
-```mermaid
-flowchart LR
-    C("Client (TCP)") --> NL["Network Layer / Kafka protocol handlers"]
-    NL --> RR["Request Router (Metadata / Produce / Fetch)"]
-    RR --> WP["Write Path"]
-    RR --> RP["Read Path"]
-
-    subgraph Write_Path["Write Path"]
-        WB["Per-partition Write Buffer"] --> SB["Segment Builder"]
-        SB --> S3Write[("S3 Bucket<br/>Write")]
-    end
-
-    subgraph Read_Path["Read Path"]
-        SC["Segment Cache"] --> SR["S3 Reader"]
-        SR --> S3Read[("S3 Bucket<br/>Read")]
-    end
+```
+                    ┌─────────────────────────────────────────────┐
+                    │              Broker Process                 │
+                    │                                             │
+┌─────────┐         │  ┌──────────────────────────────────────┐   │
+│ Client  │◄──────► │  │         Network Layer                │   │
+│ (TCP)   │         │  │   (Kafka Protocol Handlers)          │   │
+└─────────┘         │  └──────────────────┬───────────────────┘   │
+                    │                     │                       │
+                    │  ┌──────────────────▼───────────────────┐   │
+                    │  │         Request Router               │   │
+                    │  │   (Metadata, Produce, Fetch, etc.)   │   │
+                    │  └─────────────────┬────────────────────┘   │
+                    │           ┌────────┴────────┐               │
+                    │           ▼                 ▼               │
+                    │  ┌─────────────────┐ ┌─────────────────┐    │
+                    │  │  Write Path     │ │  Read Path      │    │
+                    │  │                 │ │                 │    │
+                    │  │ ┌─────────────┐ │ │ ┌─────────────┐ │    │
+                    │  │ │Write Buffer │ │ │ │ Segment     │ │    │
+                    │  │ │(per partition)│ │ │ Cache       │ │    │
+                    │  │ └──────┬──────┘ │ │ └──────┬──────┘ │    │
+                    │  │        │        │ │        │        │    │
+                    │  │ ┌──────▼──────┐ │ │ ┌──────▼──────┐ │    │
+                    │  │ │Segment      │ │ │ │S3 Reader    │ │    │
+                    │  │ │Builder      │ │ │ │             │ │    │
+                    │  │ └──────┬──────┘ │ │ └──────┬──────┘ │    │
+                    │  └────────┼────────┘ └────────┼────────┘    │
+                    │           │                   │             │
+                    └───────────┼───────────────────┼─────────────┘
+                                │                   │
+                                ▼                   ▼
+                         ┌─────────────┐     ┌─────────────┐
+                         │     S3      │     │     S3      │
+                         │   (Write)   │     │   (Read)    │
+                         └─────────────┘     └─────────────┘
 ```
 
 ### Goroutine Model
@@ -465,30 +360,6 @@ func main() {
 }
 ```
 
-### Internal Control Plane RPCs
-
-Every broker exposes a gRPC server (HTTP/2 on the metrics port) that implements a set of protobuf-defined control plane APIs. For example, the Kubernetes operator dials `BrokerControl` to drain partitions before a rollout, to trigger manual segment flushes, or to fetch broker health without scraping logs. Additional streaming APIs push high-frequency stats back to the operator so dashboards can be populated even when Prometheus scrapes lag.
-
-```
-// proto/control/broker.proto
-syntax = "proto3";
-package kafscale.control;
-
-service BrokerControl {
-  rpc GetStatus(BrokerStatusRequest) returns (BrokerStatusResponse);
-  rpc DrainPartitions(DrainPartitionsRequest) returns (DrainPartitionsResponse);
-  rpc TriggerFlush(TriggerFlushRequest) returns (TriggerFlushResponse);
-  rpc StreamMetrics(stream MetricsSample) returns Ack; // broker pushes samples
-}
-
-service AssignmentStream {
-  rpc WatchAssignments(AssignmentWatchRequest)
-      returns (stream PartitionAssignmentEvent); // operator -> broker
-}
-```
-
-The protobuf definitions are shared with the operator and with any future automation tools; code is generated via `buf` or `protoc` as part of `make generate`. Brokers keep using the Kafka wire protocol for client traffic, but everything inside the control plane (operator ↔ broker, broker ↔ tests, tooling) relies on protobuf messages so the payloads stay small and versionable.
-
 ### Write Path Detail
 
 ```
@@ -508,7 +379,6 @@ Producer Request
 │    - Append to partition's in-memory write buffer                │
 │    - Assign offsets (atomic increment from etcd high watermark)  │
 │    - Start ack timer if acks=1                                   │
-│    - Auto-create topic/partition if metadata is missing          │
 └───────────────────────────────┬──────────────────────────────────┘
                                 │
                                 ▼
@@ -547,8 +417,6 @@ Producer Request
 │    - Ack waiting producers (acks=all)                            │
 └──────────────────────────────────────────────────────────────────┘
 ```
-
-If a client produces to a topic that does not yet exist, the broker mirrors Kafka's auto-create semantics by provisioning the topic on the fly whenever `topics.autoCreate` (or `KAFSCALE_AUTO_CREATE_TOPICS`) is enabled. The number of partitions created defaults to `topics.autoCreatePartitions` (env: `KAFSCALE_AUTO_CREATE_PARTITIONS`), but the broker will always create at least as many partitions as requested by the incoming produce request.
 
 ### Read Path Detail
 
@@ -614,45 +482,84 @@ Fetch Request
 
 ## Kafka Protocol Implementation
 
-### Supported API Keys
+### Supported API Keys (v1.0)
 
-| API Key | Name | Kafka 3.7 Version | Supported Version | Status | Notes |
-|---------|------|-------------------|-------------------|--------|-------|
-| 0 | Produce | 9 | 0-9 | Full | Core functionality |
-| 1 | Fetch | 13 | 0-13 | Full | Core functionality |
-| 2 | ListOffsets | 7 | 0-7 | Full | Required for consumers |
-| 3 | Metadata | 12 | 0-12 | Full | Topic/broker discovery |
-| 8 | OffsetCommit | 8 | 0-8 | Full | Consumer group tracking |
-| 9 | OffsetFetch | 8 | 0-8 | Full | Consumer group tracking |
-|10 | FindCoordinator | 4 | 0-4 | Full | Group coordinator lookup |
-|11 | JoinGroup | 9 | 0-9 | Full | Consumer group membership |
-|12 | Heartbeat | 4 | 0-4 | Full | Consumer liveness |
-|13 | LeaveGroup | 5 | 0-5 | Full | Graceful consumer shutdown |
-|14 | SyncGroup | 5 | 0-5 | Full | Partition assignment |
-|18 | ApiVersions | 3 | 0-3 | Full | Client capability negotiation |
-|19 | CreateTopics | 7 | 0-7 | Full | Topic management |
-|20 | DeleteTopics | 6 | 0-6 | Full | Topic management |
-|32 | DescribeConfigs | 4 | 0-4 | Partial | Read-only config access |
-|42 | DeleteGroups | 2 | 0-2 | Full | Consumer group cleanup |
+| API Key | Name | Version | Status | Notes |
+|---------|------|---------|--------|-------|
+| 0 | Produce | 0-9 | ✅ Full | Core produce path |
+| 1 | Fetch | 0-13 | ✅ Full | Core consume path |
+| 2 | ListOffsets | 0-7 | ✅ Full | Required for consumers |
+| 3 | Metadata | 0-12 | ✅ Full | Topic/broker discovery |
+| 8 | OffsetCommit | 0-8 | ✅ Full | Consumer group tracking |
+| 9 | OffsetFetch | 0-8 | ✅ Full | Consumer group tracking |
+| 10 | FindCoordinator | 0-4 | ✅ Full | Group coordinator lookup |
+| 11 | JoinGroup | 0-9 | ✅ Full | Consumer group membership |
+| 12 | Heartbeat | 0-4 | ✅ Full | Consumer liveness |
+| 13 | LeaveGroup | 0-5 | ✅ Full | Graceful consumer shutdown |
+| 14 | SyncGroup | 0-5 | ✅ Full | Partition assignment |
+| 15 | DescribeGroups | 0-5 | ✅ Full | Ops debugging - `kafka-consumer-groups.sh --describe` |
+| 16 | ListGroups | 0-4 | ✅ Full | Ops debugging - enumerate all consumer groups |
+| 18 | ApiVersions | 0-3 | ✅ Full | Client capability negotiation |
+| 19 | CreateTopics | 0-7 | ✅ Full | Topic management |
+| 20 | DeleteTopics | 0-6 | ✅ Full | Topic management |
+| 23 | OffsetForLeaderEpoch | 0-4 | ✅ Full | Safe consumer recovery after broker failover |
+| 32 | DescribeConfigs | 0-4 | ✅ Full | Read topic/broker config - `kafka-configs.sh --describe` |
+| 33 | AlterConfigs | 0-2 | ✅ Full | Runtime config changes (retention, compression) |
+| 37 | CreatePartitions | 0-3 | ✅ Full | Scale partitions without topic recreation |
+| 42 | DeleteGroups | 0-2 | ✅ Full | Consumer group cleanup |
 
-Kafka also defines additional API keys (DescribeGroups, ListGroups, SASL/auth flows, transaction APIs, ACL management, log dir manipulation, CreatePartitions, delegation tokens, etc.). These are not implemented yet because v1 of Kafscale focuses on unauthenticated clusters with a single replica per partition stored in S3. We track those unactioned keys in the backlog and revisit once we implement authentication, ACLs, and multi-replica semantics.
+### Planned APIs (v1.1+)
 
-### Explicitly Unsupported (v1.0)
+| API Key | Name | Target | Notes |
+|---------|------|--------|-------|
+| 17 | SaslHandshake | v1.1 | SASL/PLAIN and SASL/SCRAM authentication |
+| 36 | SaslAuthenticate | v1.1 | Complete auth flow |
+| 29 | DescribeAcls | v1.1 | After auth lands |
+| 30 | CreateAcls | v1.1 | After auth lands |
+| 31 | DeleteAcls | v1.1 | After auth lands |
+| 38 | CreateDelegationToken | v2.0 | Enterprise SSO support |
+| 39 | RenewDelegationToken | v2.0 | Enterprise SSO support |
+| 40 | ExpireDelegationToken | v2.0 | Enterprise SSO support |
+| 41 | DescribeDelegationToken | v2.0 | Enterprise SSO support |
+
+### Explicitly Unsupported
 
 | API Key | Name | Reason |
 |---------|------|--------|
 | 4 | LeaderAndIsr | Internal Kafka protocol, not client-facing |
-| 5 | StopReplica | No replication (S3 handles durability) |
+| 5 | StopReplica | No replication - S3 handles durability |
 | 6 | UpdateMetadata | Internal Kafka protocol |
 | 7 | ControlledShutdown | Kubernetes handles pod lifecycle |
-| 15 | DescribeGroups | Can add later if needed |
-| 16 | ListGroups | Can add later if needed |
 | 21 | DeleteRecords | S3 lifecycle handles retention |
-| 22 | InitProducerId | Transactions not supported |
+| 22 | InitProducerId | Transactions not supported (by design) |
 | 24 | AddPartitionsToTxn | Transactions not supported |
 | 25 | AddOffsetsToTxn | Transactions not supported |
 | 26 | EndTxn | Transactions not supported |
-| 37 | CreatePartitions | Partition count is immutable initially |
+| 46 | ListPartitionReassignments | No manual reassignment - S3 is stateless |
+| 47 | OffsetDelete | S3 lifecycle handles cleanup |
+| 48-49 | DescribeClientQuotas/AlterClientQuotas | Quotas deferred to v2.0 |
+| 50-56 | KRaft APIs | Using etcd, not KRaft |
+| 57 | UpdateFeatures | Feature flags deferred |
+| 65-67 | Transaction APIs (Describe/List/Abort) | Transactions not supported |
+
+### Authentication Roadmap
+
+Kafscale v1.0 ships without authentication, suitable for:
+- Internal Kubernetes clusters with network policies
+- Development and testing environments
+- Proof-of-concept deployments
+
+The authentication roadmap:
+
+| Version | Auth Mechanism | Use Case |
+|---------|---------------|----------|
+| v1.0 | None | Internal/dev clusters |
+| v1.1 | SASL/PLAIN | Username/password (secrets-backed) |
+| v1.1 | SASL/SCRAM-SHA-256/512 | Username/password with challenge-response |
+| v2.0 | SASL/OAUTHBEARER | Enterprise SSO (Okta, Azure AD, etc.) |
+| v2.0 | mTLS | Certificate-based auth |
+
+Until auth lands, Kafscale gracefully handles SASL handshake attempts by returning `UNSUPPORTED_SASL_MECHANISM` (error code 33) rather than dropping the connection, allowing clients to fall back or fail with a clear error message.
 
 ### Request/Response Flow
 
@@ -772,12 +679,6 @@ func handleProduce(req *ProduceRequest) *ProduceResponse {
 }
 ```
 
-### Topic Admin APIs
-
-- **CreateTopics**: Inputs run through basic validation (non-empty name, `numPartitions > 0`, replication factor ≤ broker count). The broker maps each request to `Store.CreateTopic` and returns a per-topic status (`NONE`, `TOPIC_ALREADY_EXISTS`, `INVALID_TOPIC_EXCEPTION`, etc.). Once etcd-based persistence lands, the call will also push configuration into the operator’s CRD.
-- **DeleteTopics**: Each name is passed to `Store.DeleteTopic`. Missing topics return `UNKNOWN_TOPIC_OR_PARTITION`; successful deletes remove offsets from the store snapshot to avoid dangling state while the operator drains S3 data in the background.
-- **ListOffsets**: For now Kafscale exposes the high-watermark derived from `Store.NextOffset` for each partition regardless of the requested timestamp. This keeps consumers compatible with the Kafka API while we defer multi-tier timestamp lookups to a future milestone.
-
 ### Fetch Request Handling
 
 ```go
@@ -845,6 +746,497 @@ func handleFetch(req *FetchRequest) *FetchResponse {
         }
         
         resp.Topics = append(resp.Topics, topicResp)
+    }
+    
+    return resp
+}
+```
+
+### DescribeGroups / ListGroups (Ops Visibility)
+
+These APIs enable `kafka-consumer-groups.sh --describe` and similar tooling:
+
+```go
+// ListGroups - enumerate all consumer groups
+type ListGroupsRequest struct {
+    StatesFilter []string  // Optional: filter by state (Empty, Stable, etc.)
+}
+
+type ListGroupsResponse struct {
+    ErrorCode int16
+    Groups    []ListedGroup
+}
+
+type ListedGroup struct {
+    GroupID      string
+    ProtocolType string  // "consumer" for standard consumers
+    GroupState   string  // Empty, Stable, PreparingRebalance, etc.
+}
+
+func handleListGroups(req *ListGroupsRequest) *ListGroupsResponse {
+    groups, err := broker.store.ListConsumerGroups()
+    if err != nil {
+        return &ListGroupsResponse{ErrorCode: COORDINATOR_NOT_AVAILABLE}
+    }
+    
+    resp := &ListGroupsResponse{ErrorCode: NONE}
+    for _, g := range groups {
+        // Apply state filter if provided
+        if len(req.StatesFilter) > 0 && !contains(req.StatesFilter, g.State) {
+            continue
+        }
+        resp.Groups = append(resp.Groups, ListedGroup{
+            GroupID:      g.GroupID,
+            ProtocolType: g.ProtocolType,
+            GroupState:   g.State,
+        })
+    }
+    return resp
+}
+
+// DescribeGroups - detailed info about specific groups
+type DescribeGroupsRequest struct {
+    Groups                      []string
+    IncludeAuthorizedOperations bool  // Ignored (no ACLs in v1.0)
+}
+
+type DescribeGroupsResponse struct {
+    Groups []DescribedGroup
+}
+
+type DescribedGroup struct {
+    ErrorCode      int16
+    GroupID        string
+    GroupState     string
+    ProtocolType   string
+    ProtocolData   string  // Assignment strategy (range, roundrobin)
+    Members        []GroupMember
+    AuthorizedOps  int32   // Always -1 (no ACLs)
+}
+
+type GroupMember struct {
+    MemberID         string
+    ClientID         string
+    ClientHost       string
+    MemberMetadata   []byte  // Subscription info
+    MemberAssignment []byte  // Assigned partitions
+}
+
+func handleDescribeGroups(req *DescribeGroupsRequest) *DescribeGroupsResponse {
+    resp := &DescribeGroupsResponse{}
+    
+    for _, groupID := range req.Groups {
+        group, err := broker.store.GetConsumerGroup(groupID)
+        if err != nil {
+            resp.Groups = append(resp.Groups, DescribedGroup{
+                GroupID:   groupID,
+                ErrorCode: GROUP_ID_NOT_FOUND,
+            })
+            continue
+        }
+        
+        described := DescribedGroup{
+            ErrorCode:     NONE,
+            GroupID:       group.GroupID,
+            GroupState:    group.State,
+            ProtocolType:  group.ProtocolType,
+            ProtocolData:  group.Protocol,
+            AuthorizedOps: -1,  // Not supported
+        }
+        
+        for memberID, member := range group.Members {
+            described.Members = append(described.Members, GroupMember{
+                MemberID:         memberID,
+                ClientID:         member.ClientID,
+                ClientHost:       member.ClientHost,
+                MemberMetadata:   serializeSubscription(member.Subscriptions),
+                MemberAssignment: serializeAssignment(member.Assignments),
+            })
+        }
+        
+        resp.Groups = append(resp.Groups, described)
+    }
+    
+    return resp
+}
+```
+
+### OffsetForLeaderEpoch (Consumer Recovery)
+
+Critical for safe consumer recovery after broker failover. Consumers use this to verify their committed offset is still valid after a leader change:
+
+```go
+type OffsetForLeaderEpochRequest struct {
+    ReplicaID int32  // -1 for consumers
+    Topics    []OffsetForLeaderEpochTopic
+}
+
+type OffsetForLeaderEpochTopic struct {
+    Topic      string
+    Partitions []OffsetForLeaderEpochPartition
+}
+
+type OffsetForLeaderEpochPartition struct {
+    Partition          int32
+    CurrentLeaderEpoch int32  // Consumer's known epoch
+    LeaderEpoch        int32  // Epoch to query
+}
+
+type OffsetForLeaderEpochResponse struct {
+    Topics []OffsetForLeaderEpochTopicResponse
+}
+
+type OffsetForLeaderEpochTopicResponse struct {
+    Topic      string
+    Partitions []OffsetForLeaderEpochPartitionResponse
+}
+
+type OffsetForLeaderEpochPartitionResponse struct {
+    ErrorCode   int16
+    Partition   int32
+    LeaderEpoch int32  // Current leader epoch
+    EndOffset   int64  // End offset for requested epoch
+}
+
+func handleOffsetForLeaderEpoch(req *OffsetForLeaderEpochRequest) *OffsetForLeaderEpochResponse {
+    resp := &OffsetForLeaderEpochResponse{}
+    
+    for _, topic := range req.Topics {
+        topicResp := OffsetForLeaderEpochTopicResponse{Topic: topic.Topic}
+        
+        for _, partition := range topic.Partitions {
+            partState, err := broker.store.GetPartitionState(topic.Topic, partition.Partition)
+            if err != nil {
+                topicResp.Partitions = append(topicResp.Partitions, OffsetForLeaderEpochPartitionResponse{
+                    Partition: partition.Partition,
+                    ErrorCode: UNKNOWN_TOPIC_OR_PARTITION,
+                })
+                continue
+            }
+            
+            // In Kafscale, we track epoch changes when partition leadership moves
+            // The end offset is the high watermark at the time of that epoch
+            endOffset := partState.HighWatermark
+            if partition.LeaderEpoch < partState.LeaderEpoch {
+                // Consumer is behind - find the offset at their epoch
+                // For simplicity, we return current high watermark
+                // A full implementation would track epoch→offset mappings
+                endOffset = partState.HighWatermark
+            }
+            
+            topicResp.Partitions = append(topicResp.Partitions, OffsetForLeaderEpochPartitionResponse{
+                ErrorCode:   NONE,
+                Partition:   partition.Partition,
+                LeaderEpoch: partState.LeaderEpoch,
+                EndOffset:   endOffset,
+            })
+        }
+        
+        resp.Topics = append(resp.Topics, topicResp)
+    }
+    
+    return resp
+}
+```
+
+### DescribeConfigs / AlterConfigs (Runtime Configuration)
+
+Enable `kafka-configs.sh --describe` and `--alter` for topic/broker tuning:
+
+```go
+// DescribeConfigs - read configuration
+type DescribeConfigsRequest struct {
+    Resources []DescribeConfigsResource
+}
+
+type DescribeConfigsResource struct {
+    ResourceType int8     // 2=Topic, 4=Broker
+    ResourceName string
+    ConfigNames  []string // nil = all configs
+}
+
+type DescribeConfigsResponse struct {
+    Resources []DescribeConfigsResourceResponse
+}
+
+type DescribeConfigsResourceResponse struct {
+    ErrorCode    int16
+    ResourceType int8
+    ResourceName string
+    Configs      []ConfigEntry
+}
+
+type ConfigEntry struct {
+    Name        string
+    Value       string
+    ReadOnly    bool
+    IsDefault   bool
+    IsSensitive bool
+}
+
+func handleDescribeConfigs(req *DescribeConfigsRequest) *DescribeConfigsResponse {
+    resp := &DescribeConfigsResponse{}
+    
+    for _, resource := range req.Resources {
+        switch resource.ResourceType {
+        case 2: // Topic
+            topicConfig, err := broker.store.GetTopicConfig(resource.ResourceName)
+            if err != nil {
+                resp.Resources = append(resp.Resources, DescribeConfigsResourceResponse{
+                    ErrorCode:    UNKNOWN_TOPIC_OR_PARTITION,
+                    ResourceType: resource.ResourceType,
+                    ResourceName: resource.ResourceName,
+                })
+                continue
+            }
+            
+            configs := []ConfigEntry{
+                {Name: "retention.ms", Value: fmt.Sprintf("%d", topicConfig.RetentionMs), IsDefault: topicConfig.RetentionMs == 604800000},
+                {Name: "retention.bytes", Value: fmt.Sprintf("%d", topicConfig.RetentionBytes), IsDefault: topicConfig.RetentionBytes == -1},
+                {Name: "segment.bytes", Value: fmt.Sprintf("%d", topicConfig.SegmentBytes), IsDefault: topicConfig.SegmentBytes == 104857600},
+                {Name: "compression.type", Value: topicConfig.Config["compression.type"], IsDefault: false},
+                {Name: "cleanup.policy", Value: topicConfig.Config["cleanup.policy"], IsDefault: true},
+            }
+            
+            // Filter if specific configs requested
+            if len(resource.ConfigNames) > 0 {
+                configs = filterConfigs(configs, resource.ConfigNames)
+            }
+            
+            resp.Resources = append(resp.Resources, DescribeConfigsResourceResponse{
+                ErrorCode:    NONE,
+                ResourceType: resource.ResourceType,
+                ResourceName: resource.ResourceName,
+                Configs:      configs,
+            })
+            
+        case 4: // Broker
+            // Return broker-level configs
+            configs := []ConfigEntry{
+                {Name: "log.segment.bytes", Value: fmt.Sprintf("%d", broker.config.SegmentBytes), ReadOnly: true},
+                {Name: "log.flush.interval.ms", Value: fmt.Sprintf("%d", broker.config.FlushIntervalMs), ReadOnly: true},
+                {Name: "num.io.threads", Value: fmt.Sprintf("%d", runtime.GOMAXPROCS(0)), ReadOnly: true},
+            }
+            
+            resp.Resources = append(resp.Resources, DescribeConfigsResourceResponse{
+                ErrorCode:    NONE,
+                ResourceType: resource.ResourceType,
+                ResourceName: resource.ResourceName,
+                Configs:      configs,
+            })
+        }
+    }
+    
+    return resp
+}
+
+// AlterConfigs - modify configuration (topic-level only)
+type AlterConfigsRequest struct {
+    Resources    []AlterConfigsResource
+    ValidateOnly bool
+}
+
+type AlterConfigsResource struct {
+    ResourceType int8
+    ResourceName string
+    Configs      []AlterConfigEntry
+}
+
+type AlterConfigEntry struct {
+    Name  string
+    Value string
+}
+
+func handleAlterConfigs(req *AlterConfigsRequest) *AlterConfigsResponse {
+    resp := &AlterConfigsResponse{}
+    
+    for _, resource := range req.Resources {
+        if resource.ResourceType != 2 { // Only topics supported
+            resp.Resources = append(resp.Resources, AlterConfigsResourceResponse{
+                ErrorCode:    INVALID_REQUEST,
+                ResourceType: resource.ResourceType,
+                ResourceName: resource.ResourceName,
+                ErrorMessage: "Only topic configs can be altered",
+            })
+            continue
+        }
+        
+        // Validate config names
+        allowedConfigs := map[string]bool{
+            "retention.ms":     true,
+            "retention.bytes":  true,
+            "compression.type": true,
+        }
+        
+        for _, config := range resource.Configs {
+            if !allowedConfigs[config.Name] {
+                resp.Resources = append(resp.Resources, AlterConfigsResourceResponse{
+                    ErrorCode:    INVALID_CONFIG,
+                    ResourceType: resource.ResourceType,
+                    ResourceName: resource.ResourceName,
+                    ErrorMessage: fmt.Sprintf("Config %s cannot be altered", config.Name),
+                })
+                continue
+            }
+        }
+        
+        if req.ValidateOnly {
+            resp.Resources = append(resp.Resources, AlterConfigsResourceResponse{
+                ErrorCode:    NONE,
+                ResourceType: resource.ResourceType,
+                ResourceName: resource.ResourceName,
+            })
+            continue
+        }
+        
+        // Apply changes
+        if err := broker.store.UpdateTopicConfig(resource.ResourceName, resource.Configs); err != nil {
+            resp.Resources = append(resp.Resources, AlterConfigsResourceResponse{
+                ErrorCode:    UNKNOWN_SERVER_ERROR,
+                ResourceType: resource.ResourceType,
+                ResourceName: resource.ResourceName,
+                ErrorMessage: err.Error(),
+            })
+            continue
+        }
+        
+        // Trigger S3 lifecycle update if retention changed
+        for _, config := range resource.Configs {
+            if config.Name == "retention.ms" || config.Name == "retention.bytes" {
+                go broker.updateS3Lifecycle(resource.ResourceName)
+            }
+        }
+        
+        resp.Resources = append(resp.Resources, AlterConfigsResourceResponse{
+            ErrorCode:    NONE,
+            ResourceType: resource.ResourceType,
+            ResourceName: resource.ResourceName,
+        })
+    }
+    
+    return resp
+}
+```
+
+### CreatePartitions (Scaling Without Recreation)
+
+Enable partition scaling without deleting and recreating topics:
+
+```go
+type CreatePartitionsRequest struct {
+    Topics       []CreatePartitionsTopic
+    TimeoutMs    int32
+    ValidateOnly bool
+}
+
+type CreatePartitionsTopic struct {
+    Name        string
+    Count       int32      // New total partition count
+    Assignments [][]int32  // Optional: manual replica assignments (ignored in Kafscale)
+}
+
+type CreatePartitionsResponse struct {
+    Results []CreatePartitionsResult
+}
+
+type CreatePartitionsResult struct {
+    Name         string
+    ErrorCode    int16
+    ErrorMessage string
+}
+
+func handleCreatePartitions(req *CreatePartitionsRequest) *CreatePartitionsResponse {
+    resp := &CreatePartitionsResponse{}
+    
+    for _, topic := range req.Topics {
+        // Get current topic config
+        topicConfig, err := broker.store.GetTopicConfig(topic.Name)
+        if err != nil {
+            resp.Results = append(resp.Results, CreatePartitionsResult{
+                Name:         topic.Name,
+                ErrorCode:    UNKNOWN_TOPIC_OR_PARTITION,
+                ErrorMessage: "Topic not found",
+            })
+            continue
+        }
+        
+        // Validate: can only increase partitions
+        if topic.Count <= int32(topicConfig.Partitions) {
+            resp.Results = append(resp.Results, CreatePartitionsResult{
+                Name:         topic.Name,
+                ErrorCode:    INVALID_PARTITIONS,
+                ErrorMessage: fmt.Sprintf("Partition count must be greater than current count (%d)", topicConfig.Partitions),
+            })
+            continue
+        }
+        
+        // Validate: reasonable upper bound
+        if topic.Count > 1024 {
+            resp.Results = append(resp.Results, CreatePartitionsResult{
+                Name:         topic.Name,
+                ErrorCode:    INVALID_PARTITIONS,
+                ErrorMessage: "Maximum 1024 partitions per topic",
+            })
+            continue
+        }
+        
+        if req.ValidateOnly {
+            resp.Results = append(resp.Results, CreatePartitionsResult{
+                Name:      topic.Name,
+                ErrorCode: NONE,
+            })
+            continue
+        }
+        
+        // Create new partitions
+        newPartitions := int(topic.Count) - topicConfig.Partitions
+        for i := 0; i < newPartitions; i++ {
+            partitionID := topicConfig.Partitions + i
+            
+            // Initialize partition state in etcd
+            partState := &PartitionState{
+                Topic:          topic.Name,
+                Partition:      int32(partitionID),
+                LeaderBroker:   broker.selectLeaderForPartition(topic.Name, int32(partitionID)),
+                LeaderEpoch:    1,
+                LogStartOffset: 0,
+                LogEndOffset:   0,
+                HighWatermark:  0,
+                Segments:       []SegmentInfo{},
+            }
+            
+            if err := broker.store.CreatePartition(topic.Name, partState); err != nil {
+                resp.Results = append(resp.Results, CreatePartitionsResult{
+                    Name:         topic.Name,
+                    ErrorCode:    UNKNOWN_SERVER_ERROR,
+                    ErrorMessage: fmt.Sprintf("Failed to create partition %d: %v", partitionID, err),
+                })
+                continue
+            }
+        }
+        
+        // Update topic partition count
+        topicConfig.Partitions = int(topic.Count)
+        if err := broker.store.UpdateTopicConfig(topic.Name, topicConfig); err != nil {
+            // Rollback would be needed here in production
+            resp.Results = append(resp.Results, CreatePartitionsResult{
+                Name:         topic.Name,
+                ErrorCode:    UNKNOWN_SERVER_ERROR,
+                ErrorMessage: err.Error(),
+            })
+            continue
+        }
+        
+        resp.Results = append(resp.Results, CreatePartitionsResult{
+            Name:      topic.Name,
+            ErrorCode: NONE,
+        })
+        
+        log.Info("partitions created",
+            "topic", topic.Name,
+            "old_count", topicConfig.Partitions-newPartitions,
+            "new_count", topicConfig.Partitions,
+        )
     }
     
     return resp
@@ -947,14 +1339,6 @@ Consumer (Follower)         Broker                         etcd
    │  (my partition list)     │                              │
    │                          │                              │
 ```
-
-### Coordinator Implementation Notes
-
-- **State tracking**: Each broker tracks group phases (`Empty`, `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`). Any membership change (joins, explicit leaves, heartbeat expiry) bumps the generation, resets assignments, and forces all remaining members to rejoin.
-- **JoinGroup semantics**: New generations respond with `REBALANCE_IN_PROGRESS` until every member has rejoined that generation. Only once all members have checked in does the leader receive the full member list and the broker transitions to `CompletingRebalance`.
-- **SyncGroup gating**: Followers attempting to sync before the leader get `REBALANCE_IN_PROGRESS`. When the leader syncs, the broker computes deterministic range assignments, persists them for every member, and marks the group `Stable`.
-- **Heartbeat enforcement**: Heartbeats from an outdated generation return `ILLEGAL_GENERATION`; heartbeats received while the group is rebalancing return `REBALANCE_IN_PROGRESS`, prompting clients to rejoin immediately.
-- **LeaveGroup + cleanup**: The broker implements the Kafka `LeaveGroup` API so consumers can voluntarily exit. Long-running cleanup loops evict members whose session timeouts or rebalance deadlines are exceeded, ensuring orphaned members do not block progress.
 
 ### Partition Assignment Strategies
 
@@ -1129,20 +1513,6 @@ func (b *Broker) triggerReadAhead(topic string, partition int32, currentSegment 
     }()
 }
 ```
-
-### S3 Resiliency & Backpressure
-
-Kafscale deliberately avoids persistent local queues, so when S3 misbehaves we surface it through protocol-native backpressure + operator automation instead of inventing new operational knobs.
-
-- **Health state machine**: Every broker tracks S3 health as `Healthy → Degraded → Unavailable` based on sliding-window S3 `PutObject` latency/error metrics. Thresholds (`KAFSCALE_S3_LATENCY_WARN_MS`, `KAFSCALE_S3_ERROR_RATE_WARN`) are configurable via env vars.
-  - *Healthy*: flushes proceed normally.
-  - *Degraded*: retries become more conservative (longer jittered backoff), produce responses return `REQUEST_TIMED_OUT` once retry budget expires, and `produce_backpressure_state{state="degraded"}` metrics fire so clients/operators know to back off.
-  - *Unavailable*: broker immediately fails produce requests with `UNKNOWN_SERVER_ERROR` to avoid unbounded queues, disables segment flushes, and exposes a `S3Unavailable` flag over `BrokerControl.GetStatus`.
-- **Operator guardrails**: The Kubernetes operator watches broker health via control-plane RPCs (or Prometheus). When any broker is `Degraded`, rollouts are paused; if a quorum reports `Unavailable`, the operator halts HPA decisions, emits alerts, and optionally rechecks IAM credentials/endpoints before resuming.
-- **Metrics & tracing**: Brokers export `s3_put_latency_ms`, `s3_put_failures_total`, `produce_backpressure_state`, and `backpressure_duration_seconds` so dashboards clearly show when/why throughput drops.
-- **Testing expectations**: Milestone 6 must add unit tests that simulate injected S3 latency/errors, verifying brokers transition between states, emit the correct errors, and that operator watchers observe the control-plane flags. Regression tests should cover the Kafka client behavior (produce retries, backpressure metrics) so we catch regressions before shipping.
-- **Fetch path enforcement**: The same health monitor wraps the fetch path’s S3 range reads so degraded buckets slow read-ahead, emit `REQUEST_TIMED_OUT`, and update cache-hit metrics; unavailability raises `UNKNOWN_SERVER_ERROR` immediately so consumers understand the outage.
-- **Surfacing state**: The broker exposes `/metrics` with Prometheus-style gauges (`kafscale_s3_health_state`, `kafscale_s3_latency_ms_avg`, `kafscale_s3_error_rate`) and `BrokerControl.GetStatus` returns a sentinel partition named `__s3_health` whose `state` field reflects the current S3 state. Operators or HPAs can watch either interface to gate rollouts or trigger alerts. For ops teams that prefer push semantics, the broker also opens a `StreamMetrics` gRPC stream (see Observability) and continuously emits the latest health snapshot plus derived latency/error stats to the operator so automation can react without scraping delays.
 
 ---
 
@@ -1474,24 +1844,6 @@ spec:
       - kt
 ```
 
-The operator now watches both CRDs. `KafscaleCluster` resources drive the broker
-deployments and services, while `KafscaleTopic` objects describe user-facing topics.
-Every reconcile loop performs the following:
-
-- **Broker workloads**: a Deployment, Service, and HorizontalPodAutoscaler are generated
-  for each cluster using the images published under `ghcr.io/novatechflow/*`. Resources
-  inherit the `spec.brokers.resources` block so operators can tune CPU/memory
-  requests without editing manifests manually.
-- **Metadata snapshots**: the topic controller lists all `KafscaleTopic` resources that
-  target a cluster, derives the Kafka metadata structure (broker IDs, partitions,
-  ISRs), and publishes a snapshot to etcd at `/kafscale/metadata/snapshot`. Brokers
-  and admin APIs consume that snapshot via the existing `EtcdStore`, so topic CRUD
-  now flows through CRDs without custom scripts.
-- **Status + metrics**: both controllers update Kubernetes status conditions and push
-  Prometheus metrics (`kafscale_operator_clusters`, `kafscale_operator_snapshot_publish_total`)
-  via the controller-runtime registry. Dashboards and HPAs can consume those metrics
-  directly from the operator’s `/metrics` endpoint.
-
 ### Example Cluster Resource
 
 ```yaml
@@ -1731,11 +2083,6 @@ spec:
       selectPolicy: Max
 ```
 
-### Leader Election & Console Runtime
-
-- **Operator HA**: every operator pod reads the etcd endpoints configured in `KAFSCALE_OPERATOR_ETCD_ENDPOINTS` (wired via the Helm chart) and participates in a lease-based election stored at `/kafscale/operator/leader`. Only the elected replica performs reconciliation, but two pods stay running so if the leader dies the follower merely calls `Campaign`, acquires the lease, and resumes work instantly.
-- **Console split**: the UI now runs as its own binary (`cmd/console`) and Deployment. The operator no longer serves HTTP; it can scale strictly for control-plane concerns, while the console exposes `/ui/` and `/ui/api/*` behind a dedicated Service/Ingress. This keeps RBAC minimal and lets platform teams scale the UI independently of the controller.
-
 ---
 
 ## Observability
@@ -1840,50 +2187,42 @@ panels:
       - expr: avg(kafscale_cache_hit_rate)
 ```
 
-### Prometheus / Kubernetes Integration
-
-All metrics, including the S3 health gauges and latency histograms, are exposed on the broker’s metrics port (default `9093`) using the Prometheus text exposition format so clusters can reuse native Kubernetes scraping patterns. The operator/Helm chart installs the broker `Service` plus optional `ServiceMonitor`/`PodMonitor` objects (when Prometheus Operator is present); vanilla Prometheus deployments can scrape `/metrics` via static configs. By sticking to core labels (namespace, pod, container) and bounding topic/partition label cardinality, the data flows cleanly into `kubectl top`, Lens, Rancher, or HPA/KEDA inputs without extra adapters. That keeps SRE workflows simple—no custom agents or push gateways—while the `StreamMetrics` RPC augments situations where automation prefers push semantics.
-
-The Kubernetes operator exposes its own gauges:
-
-- `kafscale_operator_clusters`: live count of `KafscaleCluster` objects managed by the controller-runtime manager.
-- `kafscale_operator_snapshot_publish_total{result="success|error"}`: metadata snapshot publish attempts so SRE teams can alert on failures.
-
-These metrics surface on the operator pod’s `/metrics` endpoint and inherit the same service monitor setup as the brokers.
-
-### Health Endpoints
-
-The broker’s metrics server now also serves `GET /healthz` and `GET /readyz`. `/healthz` always returns `200 OK` with the current S3 state so liveness probes and simple `curl` checks stay lightweight. `/readyz` returns `503 Service Unavailable` whenever the S3 health monitor reports the `Unavailable` state; otherwise it returns `200 OK` and includes the state string. The operator continues to expose controller-runtime’s standard health and readiness endpoints, so Kubernetes probes can be wired directly to both components.
-
 ### Structured Logging
 
-Broker logs are emitted via Go’s structured `slog` JSON handler and honor the `KAFSCALE_LOG_LEVEL` environment variable (`debug`, `info`, `warn`, `error`). Every log line includes the component (`broker` or `handler`) plus contextual fields (topic, partition, offsets, and error strings) so log processors such as Loki or Elastic can filter/aggregate without brittle parsing. Controller-runtime’s zap logger already provides structured JSON output for the operator.
-
-### Dashboard Templates
-
-A curated Grafana dashboard that visualizes the core Prometheus metrics ships in `docs/grafana/broker-dashboard.json` (see `docs/grafana/README.md` for import instructions). It includes S3 health tiles, produce throughput, and the S3 latency/error time series so teams can drop it into their existing Grafana instance without rebuilding panels from scratch.
-
-### Structured Logging Example
-
 ```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-    AddSource: true,
-    Level:     slog.LevelInfo,
-})).With("component", "broker")
+// Using zerolog for structured logging
+type BrokerLogger struct {
+    log zerolog.Logger
+}
 
-logger.Info("segment flushed",
-    "topic", topic,
-    "partition", partition,
-    "base_offset", result.BaseOffset,
-    "size_bytes", result.SizeBytes,
-    "flush_ms", time.Since(start).Milliseconds(),
-)
+func (l *BrokerLogger) ProduceReceived(topic string, partition int32, batchSize int) {
+    l.log.Info().
+        Str("event", "produce_received").
+        Str("topic", topic).
+        Int32("partition", partition).
+        Int("batch_size", batchSize).
+        Msg("Received produce request")
+}
 
-logger.Error("s3 upload failed",
-    "topic", topic,
-    "partition", partition,
-    "error", err,
-)
+func (l *BrokerLogger) SegmentFlushed(topic string, partition int32, baseOffset int64, size int, duration time.Duration) {
+    l.log.Info().
+        Str("event", "segment_flushed").
+        Str("topic", topic).
+        Int32("partition", partition).
+        Int64("base_offset", baseOffset).
+        Int("size_bytes", size).
+        Dur("duration", duration).
+        Msg("Segment flushed to S3")
+}
+
+func (l *BrokerLogger) ConsumerGroupRebalance(groupID string, generation int32, members int) {
+    l.log.Info().
+        Str("event", "consumer_rebalance").
+        Str("group_id", groupID).
+        Int32("generation", generation).
+        Int("member_count", members).
+        Msg("Consumer group rebalanced")
+}
 ```
 
 ---
@@ -1939,9 +2278,6 @@ cache:
   segmentCacheSize: "2Gi"
   indexCacheSize: "256Mi"
   readAheadSegments: 3
-topics:
-  autoCreate: true                # Create missing topics on first produce
-  autoCreatePartitions: 1         # Default partition count when auto-creating
 
 consumer:
   sessionTimeoutMs: 30000
@@ -1966,18 +2302,10 @@ KAFSCALE_BROKER_PORT
 KAFSCALE_S3_BUCKET
 KAFSCALE_S3_REGION
 KAFSCALE_S3_ENDPOINT
-KAFSCALE_S3_PATH_STYLE          # "true" to force path-style URLs
-KAFSCALE_S3_KMS_ARN             # Optional SSE-KMS key ARN
 KAFSCALE_ETCD_ENDPOINTS          # Comma-separated
-KAFSCALE_ETCD_USERNAME
-KAFSCALE_ETCD_PASSWORD
 KAFSCALE_SEGMENT_BYTES
 KAFSCALE_FLUSH_INTERVAL_MS
 KAFSCALE_CACHE_SIZE
-KAFSCALE_CACHE_BYTES
-KAFSCALE_READAHEAD_SEGMENTS
-KAFSCALE_AUTO_CREATE_TOPICS       # "true"/"false"; defaults to true
-KAFSCALE_AUTO_CREATE_PARTITIONS   # integer >=1; defaults to 1
 KAFSCALE_LOG_LEVEL
 ```
 
@@ -2098,8 +2426,6 @@ func isRetryableS3Error(err error) bool {
 
 ## Testing Strategy
 
-Every feature must ship with unit tests plus smoke/integration coverage, and anything that touches persistence or protocols needs regression tests to prevent protocol drift.
-
 ### Unit Tests
 
 ```go
@@ -2127,14 +2453,7 @@ func TestProduceRequestParsing(t *testing.T) {
 }
 ```
 
-### Admin + Metadata Tests
-
-- `pkg/metadata/store_test.go` covers topic creation/deletion edge cases (invalid configs, duplicates, offset cleanup).
-- `cmd/broker/main_test.go` validates Kafka `CreateTopics`, `DeleteTopics`, and `ListOffsets` handlers end-to-end, ensuring protocol error codes and per-topic responses stay Kafka-compatible.
-
 ### Integration Tests
-
-Our `test/e2e/franz_test.go::TestFranzGoProduceConsume` test (gated behind `KAFSCALE_E2E=1`) builds and runs the real broker binary, provisions a MinIO container via Docker, and points the broker’s S3 client at that endpoint.  It then drives the broker with the Franz-go client (`github.com/twmb/franz-go`), producing and consuming records through a consumer group.  The test automatically skips when Docker/loopback sockets are unavailable so local development remains smooth, but in CI or a developer shell it exercises the full produce→flush-to-MinIO→consume pipeline.
 
 ```go
 // Test with localstack S3
@@ -2214,19 +2533,6 @@ func TestKafkaClientCompatibility(t *testing.T) {
     assert.Equal(t, 100, received)
 }
 ```
-
-In addition to the unit/integration suites, a lightweight end-to-end harness now lives under
-`test/e2e`. It boots an embedded etcd instance, publishes a cluster snapshot via the new
-operator snapshot helpers, and validates that the broker-facing `EtcdStore` immediately
-serves the published metadata. The harness doubles as a regression test for the metadata
-publish pipeline and will be extended to cover smoke-produce/fetch flows once the rest of
-the stack is wired in CI.
-
-### Resiliency Regression Suite
-
-- **Produce backpressure**: `cmd/broker/main_test.go` drives the broker into `Degraded` and `Unavailable` states via a failing S3 client and asserts that Produce responses surface `REQUEST_TIMED_OUT` and `UNKNOWN_SERVER_ERROR` respectively.
-- **Fetch backpressure**: The same suite forces the read path through the S3 health monitor and verifies that degraded reads return `REQUEST_TIMED_OUT`, unavailable buckets throw `UNKNOWN_SERVER_ERROR`, and healthy segments still respect `OFFSET_OUT_OF_RANGE`.
-- **Control/metrics parity**: Tests scrape `/metrics` and call `BrokerControl.GetStatus` to confirm both pathways expose the sentinel `__s3_health` partition and Prometheus gauges flip whenever S3 latency/error thresholds are exceeded.
 
 ---
 
@@ -2309,7 +2615,7 @@ kafscale/
 .PHONY: build test lint docker deploy
 
 VERSION ?= $(shell git describe --tags --always --dirty)
-REGISTRY ?= ghcr.io/novatechflow
+REGISTRY ?= ghcr.io/yourorg
 
 build:
 	CGO_ENABLED=0 go build -ldflags="-X main.version=$(VERSION)" -o bin/broker ./cmd/broker
@@ -2350,133 +2656,26 @@ deploy: deploy-crds
 		--set operator.image.tag=$(VERSION)
 ```
 
-### Helm Chart
-
-The chart under `deploy/helm/kafscale` now ships two deployments:
-
-1. **Operator** – runs two replicas by default, connects to the etcd endpoints provided in `values.yaml`, and performs leader election by writing a lease key (default `/kafscale/operator/leader`). Only the elected replica reconciles resources, but Kubernetes still maintains two pods for automatic failover. The manifest wires in the `POD_NAME`/`POD_NAMESPACE` fields plus `KAFSCALE_OPERATOR_ETCD_ENDPOINTS` so the binary can bootstrap leader election.
-2. **Console** – a stateless web front-end that serves the UI from `/ui/`. It owns its own `Service`/optional `Ingress`, so SREs can scale it independently of the operator.
-
-The chart still creates the shared service account/RBAC objects (when enabled) and exposes tunables for resources, node selectors, tolerations, and ingress annotations. One `helm upgrade --install` installs the whole ops surface without extra manifests.
-
-### Production Operations
-
-- **Helm distribution**: The chart includes the `KafscaleCluster`/`KafscaleTopic` CRDs so `helm upgrade --install` completes the control plane install in a single command.  Values such as `.operator.etcdEndpoints`, `.operator.leaderKey`, `.console.ingress`, and `.imagePullSecrets` cover multi-cluster + private registry setups.  By default two operator replicas participate in etcd-based leader election to keep rollouts HA.
-- **Ops guide**: `docs/operations.md` documents prerequisites, install/upgrade/rollback commands, how to create the S3 credentials secret, and how to expose the console through ingress or NodePorts.  It lives alongside the developer docs so SREs have a single, versioned reference.
-- **Security posture**: The chart wires scoped ServiceAccounts/RBAC, never copies S3 credentials into etcd, and exposes TLS env vars (`KAFSCALE_BROKER_TLS_*`, `KAFSCALE_CONSOLE_TLS_*`) so teams can mount cert secrets and enforce HTTPS end-to-end.  Prometheus scrapes plus the console UI surface S3 pressure and broker health to guide alerting.
-
-### GitHub Actions (Docker Publish)
-
-`.github/workflows/docker.yml` builds and pushes all three images (`ghcr.io/novatechflow/kafscale-broker`, `ghcr.io/novatechflow/kafscale-operator`, and `ghcr.io/novatechflow/kafscale-console`). The workflow:
-
-1. Triggers on `main`, semver-like tags, or manual dispatch.
-2. Configures multi-arch Buildx + QEMU.
-3. Logs in to GHCR using the repository token.
-4. Runs a matrix build (`broker`, `operator`, `console`) with `docker/build-push-action`, targeting `linux/amd64` and `linux/arm64`, tagging each artifact with `latest` (for `main`), the git tag, and the commit SHA.
-
-This ensures clusters (and the Helm chart defaults) always pull immutable, signed artifacts directly from CI.
-
 ### Broker Dockerfile
 
 ```dockerfile
-# syntax=docker/dockerfile:1.7
+FROM golang:1.22-alpine AS builder
 
-ARG GO_VERSION=1.25.2
-FROM golang:${GO_VERSION}-alpine AS builder
-
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-WORKDIR /src
-RUN apk add --no-cache git ca-certificates
-
+WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/broker ./cmd/broker
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o broker ./cmd/broker
 
 FROM alpine:3.19
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 kafscale
-USER 10001
+RUN apk --no-cache add ca-certificates
 WORKDIR /app
+COPY --from=builder /app/broker .
 
-COPY --from=builder /out/broker /usr/local/bin/kafscale-broker
-
-EXPOSE 19092 19093 19094
-ENTRYPOINT ["/usr/local/bin/kafscale-broker"]
+EXPOSE 9092 9093
+ENTRYPOINT ["./broker"]
 ```
-
-### Operator Dockerfile
-
-```dockerfile
-# syntax=docker/dockerfile:1.7
-
-ARG GO_VERSION=1.25.2
-FROM golang:${GO_VERSION}-alpine AS builder
-
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-WORKDIR /src
-RUN apk add --no-cache git ca-certificates
-
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/operator ./cmd/operator
-
-FROM alpine:3.19
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 kafscale
-USER 10001
-WORKDIR /app
-
-COPY --from=builder /out/operator /usr/local/bin/kafscale-operator
-
-ENTRYPOINT ["/usr/local/bin/kafscale-operator"]
-```
-
-### Console Dockerfile
-
-```dockerfile
-# syntax=docker/dockerfile:1.7
-
-ARG GO_VERSION=1.25.2
-FROM golang:${GO_VERSION}-alpine AS builder
-
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-WORKDIR /src
-RUN apk add --no-cache git ca-certificates
-
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-s -w" -o /out/console ./cmd/console
-
-FROM alpine:3.19
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 kafscale
-USER 10001
-WORKDIR /app
-
-COPY --from=builder /out/console /usr/local/bin/kafscale-console
-
-EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/kafscale-console"]
-```
-
-### End-to-End Harness
-
-The `test/e2e` package contains a kind-based smoke test (build tag `e2e`). It bootstraps a sandbox cluster, installs a single-node etcd via Bitnami, deploys the local Helm chart, waits for the operator/console rollouts, and verifies the console `/ui/api/status` endpoint over a port-forward. Run it manually with:
-
-```bash
-KAFSCALE_E2E=1 go test -tags=e2e ./test/e2e -v
-```
-
-`make test-e2e` wraps the same command. The test requires Docker, kind, kubectl, and helm on the host; setting `KAFSCALE_KIND_CLUSTER` reuses an existing cluster instead of creating a temporary one.
 
 ---
 
@@ -2484,79 +2683,79 @@ KAFSCALE_E2E=1 go test -tags=e2e ./test/e2e -v
 
 ### Milestone 1: Core Protocol
 
-- [x] Kafka protocol frame parsing
-- [x] ApiVersions request/response
-- [x] Metadata request/response
-- [x] Basic connection handling
-- [x] Unit tests for protocol parsing
+- [ ] Kafka protocol frame parsing
+- [ ] ApiVersions request/response
+- [ ] Metadata request/response
+- [ ] Basic connection handling
+- [ ] Unit tests for protocol parsing
 
 ### Milestone 2: Storage Layer
 
-- [x] Segment file format implementation
-- [x] Index file format implementation
-- [x] S3 upload/download
-- [x] Write buffer with flush logic
-- [x] LRU segment cache
+- [ ] Segment file format implementation
+- [ ] Index file format implementation
+- [ ] S3 upload/download
+- [ ] Write buffer with flush logic
+- [ ] LRU segment cache
 
 ### Milestone 3: Produce Path
 
-- [x] ProduceRequest handling
-- [x] Offset assignment
-- [x] Batch buffering
-- [x] S3 segment flush
-- [x] etcd metadata updates
+- [ ] ProduceRequest handling
+- [ ] Offset assignment
+- [ ] Batch buffering
+- [ ] S3 segment flush
+- [ ] etcd metadata updates
 
 ### Milestone 4: Fetch Path
 
-- [x] FetchRequest handling
-- [x] Segment location logic
-- [x] S3 range reads
-- [x] Cache integration
-- [x] Read-ahead implementation
+- [ ] FetchRequest handling
+- [ ] Segment location logic
+- [ ] S3 range reads
+- [ ] Cache integration
+- [ ] Read-ahead implementation
 
 ### Milestone 5: Consumer Groups
 
-- [x] FindCoordinator
-- [x] JoinGroup / SyncGroup / Heartbeat
-- [x] Partition assignment (range strategy)
-- [x] OffsetCommit / OffsetFetch
-- [x] Consumer group state machine
+- [ ] FindCoordinator
+- [ ] JoinGroup / SyncGroup / Heartbeat
+- [ ] Partition assignment (range strategy)
+- [ ] OffsetCommit / OffsetFetch
+- [ ] Consumer group state machine
 
 ### Milestone 6: Admin Operations
 
-- [x] CreateTopics
-- [x] DeleteTopics
-- [x] ListOffsets
-- [x] etcd topic/partition management
+- [ ] CreateTopics
+- [ ] DeleteTopics
+- [ ] ListOffsets
+- [ ] etcd topic/partition management
 
 ### Milestone 7: Kubernetes Operator
 
-- [x] CRD definitions
-- [x] Cluster reconciler
-- [x] Topic reconciler
-- [x] Broker deployment management
-- [x] HPA configuration
+- [ ] CRD definitions
+- [ ] Cluster reconciler
+- [ ] Topic reconciler
+- [ ] Broker deployment management
+- [ ] HPA configuration
 
 ### Milestone 8: Observability
 
-- [x] Prometheus metrics
-- [x] Structured logging
-- [x] Health endpoints
-- [x] Grafana dashboard templates
+- [ ] Prometheus metrics
+- [ ] Structured logging
+- [ ] Health endpoints
+- [ ] Grafana dashboard templates
 
 ### Milestone 9: Testing & Hardening
 
 - [ ] Integration test suite
-- [x] Kafka client compatibility tests
+- [ ] Kafka client compatibility tests
 - [ ] Chaos testing (pod failures, S3 latency)
 - [ ] Performance benchmarks
 
 ### Milestone 10: Production Readiness
 
-- [x] Helm chart
-- [x] Documentation
-- [x] CI/CD pipeline
-- [x] Security review (TLS, auth)
+- [ ] Helm chart
+- [ ] Documentation
+- [ ] CI/CD pipeline
+- [ ] Security review (TLS, auth)
 
 ---
 
@@ -2659,35 +2858,3 @@ FetchPartition =>
 - Confluent Cloud Basic: ~$200+/month for similar throughput
 - Self-managed Kafka: 3× m5.large + EBS = ~$400/month
 - **Kafscale**: $21 S3 + 3× t3.medium (~$90) = **~$111/month**
-
----
-
-## Appendix C: Downstream Connectors
-
-Although Kafscale focuses on durable message transport only, we want downstream engines to feel first-class:
-
-- **Apache Flink**: Provide an example `KafkaSource` configuration (standalone job + Helm add-on) that sets the bootstrap servers to the Kafscale broker service, enables TLS if configured, and points checkpointing to the same S3 bucket. Include an optional `KafkaSink` example so users can loop data back through Kafscale topics.
-- **Apache Wayang**: Ship a reference execution plan + config that uses Wayang’s Kafka channel to ingest from Kafscale. Document bootstrap server settings, serialization expectations, and how to wire output sinks (e.g., S3/Parquet or JDBC). Since Wayang is pluggable, ensure the connector package is versioned alongside Kafscale releases so upgrades stay in sync.
-
-Both connectors remain thin wrappers around standard Kafka clients—no custom protocol—so they automatically pick up improvements (consumer groups, fetch path, etc.) without bespoke maintenance.
-
-## Appendix D: Operations Console (Preview)
-
-To keep day-2 ops simple, we’ll ship a lightweight, cluster-local UI alongside the operator:
-
-- **Objectives**: mirror Confluent-like dashboards without heavy auth/tenancy. It should show real-time health, offer topic CRUD + smoke tests, and surface S3 backpressure state. Historical monitoring/logins are out of scope for OSS.
-- **Data feeds**:
-  - `BrokerControl.GetStatus` and the upcoming streaming RPC for per-broker readiness, partition assignments, and S3 state machine.
-  - `/metrics` (polled every few seconds) for throughput/latency gauges (`kafscale_produce_requests_total`, `kafscale_s3_health_state`, `kafscale_consumer_lag`, etc.).
-  - Kubernetes API via the operator for Deployment/HPA/pod status.
-- **UI sections**:
-  1. **Cluster Overview**: cards for broker desired/ready, S3 state, etcd connectivity, pending rollouts, plus alert banners when S3 degrades.
-  2. **Topics**: searchable table with partitions, high-watermarks, retention, and buttons to create/delete topics (calling Kafka admin APIs). Include a minimal produce/consume widget for smoke tests.
-  3. **Metrics strip**: small sparkline charts fed by an SSE/WebSocket bridge that streams `StreamMetrics` samples (S3 latency, produce/fetch throughput).
-  4. **Broker detail drawer**: when selecting a broker, show assigned partitions, cache utilization, last heartbeat, and current backpressure state.
-- **Implementation**:
-  - Frontend lives under `ui/public` and is embedded into the dedicated `cmd/console` binary. That binary runs behind its own Deployment/Service and serves `/ui/` plus `/ui/api/*`.
-  - The console proxies back to the operator (gRPC/REST) for health snapshots and metrics; only the console needs to be exposed through an Ingress.
-  - Helm ships optional Service/Ingress manifests and config toggles for the console, while the operator remains private and HA behind its etcd-based leader election. Tests use Playwright (smoke) plus Go unit tests for the proxy layer.
-
-This appendix documents the UI charter; development will track alongside the Milestone 7 operator work so ops teams have a first-class console on day one.

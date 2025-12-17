@@ -28,6 +28,7 @@ import (
 
 const (
 	defaultKafkaAddr   = ":19092"
+	defaultKafkaPort   = 19092
 	defaultMetricsAddr = ":19093"
 	defaultControlAddr = ":19094"
 	brokerVersion      = "dev"
@@ -47,29 +48,46 @@ type handler struct {
 	logger               *slog.Logger
 	autoCreateTopics     bool
 	autoCreatePartitions int32
+	traceKafka           bool
 }
 
 func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, req protocol.Request) ([]byte, error) {
 	switch req.(type) {
 	case *protocol.ApiVersionsRequest:
-		return protocol.EncodeApiVersionsResponse(&protocol.ApiVersionsResponse{
+		errorCode := protocol.NONE
+		if header.APIVersion != 0 {
+			errorCode = protocol.UNSUPPORTED_VERSION
+		}
+		resp := &protocol.ApiVersionsResponse{
 			CorrelationID: header.CorrelationID,
-			ErrorCode:     0,
+			ErrorCode:     errorCode,
 			Versions:      h.apiVersions,
-		})
+		}
+		if h.traceKafka {
+			h.logger.Debug("api versions response", "versions", resp.Versions)
+		}
+		return protocol.EncodeApiVersionsResponse(resp)
 	case *protocol.MetadataRequest:
 		metaReq := req.(*protocol.MetadataRequest)
 		meta, err := h.store.Metadata(ctx, metaReq.Topics)
 		if err != nil {
 			return nil, fmt.Errorf("load metadata: %w", err)
 		}
-		return protocol.EncodeMetadataResponse(&protocol.MetadataResponse{
+		resp := &protocol.MetadataResponse{
 			CorrelationID: header.CorrelationID,
 			Brokers:       meta.Brokers,
 			ClusterID:     meta.ClusterID,
 			ControllerID:  meta.ControllerID,
 			Topics:        meta.Topics,
-		})
+		}
+		if h.traceKafka {
+			topicSummaries := make([]string, 0, len(meta.Topics))
+			for _, topic := range meta.Topics {
+				topicSummaries = append(topicSummaries, fmt.Sprintf("%s(error=%d partitions=%d)", topic.Name, topic.ErrorCode, len(topic.Partitions)))
+			}
+			h.logger.Debug("metadata response", "topics", topicSummaries, "brokers", len(meta.Brokers))
+		}
+		return protocol.EncodeMetadataResponse(resp)
 	case *protocol.ProduceRequest:
 		return h.handleProduce(ctx, header, req.(*protocol.ProduceRequest))
 	case *protocol.FetchRequest:
@@ -168,6 +186,9 @@ func (h *handler) handleProduce(ctx context.Context, header *protocol.RequestHea
 	now := time.Now().UnixMilli()
 
 	for _, topic := range req.Topics {
+		if h.traceKafka {
+			h.logger.Debug("produce request received", "topic", topic.Name, "partitions", len(topic.Partitions), "acks", req.Acks, "timeout_ms", req.TimeoutMs)
+		}
 		partitionResponses := make([]protocol.ProducePartitionResponse, 0, len(topic.Partitions))
 		for _, part := range topic.Partitions {
 			if h.s3Health.State() == broker.S3StateUnavailable {
@@ -175,6 +196,9 @@ func (h *handler) handleProduce(ctx context.Context, header *protocol.RequestHea
 					Partition: part.Partition,
 					ErrorCode: protocol.UNKNOWN_SERVER_ERROR,
 				})
+				if h.traceKafka {
+					h.logger.Debug("produce rejected due to unavailable S3", "topic", topic.Name, "partition", part.Partition)
+				}
 				continue
 			}
 			plog, err := h.getPartitionLog(ctx, topic.Name, part.Partition)
@@ -192,6 +216,9 @@ func (h *handler) handleProduce(ctx context.Context, header *protocol.RequestHea
 					Partition: part.Partition,
 					ErrorCode: protocol.UNKNOWN_SERVER_ERROR,
 				})
+				if h.traceKafka {
+					h.logger.Debug("produce record batch decode failed", "topic", topic.Name, "partition", part.Partition, "error", err)
+				}
 				continue
 			}
 			result, err := plog.AppendBatch(ctx, batch)
@@ -200,6 +227,9 @@ func (h *handler) handleProduce(ctx context.Context, header *protocol.RequestHea
 					Partition: part.Partition,
 					ErrorCode: h.backpressureErrorCode(),
 				})
+				if h.traceKafka {
+					h.logger.Debug("produce append failed", "topic", topic.Name, "partition", part.Partition, "error", err)
+				}
 				continue
 			}
 			if req.Acks == -1 {
@@ -219,6 +249,9 @@ func (h *handler) handleProduce(ctx context.Context, header *protocol.RequestHea
 				LogAppendTimeMs: now,
 				LogStartOffset:  0,
 			})
+			if h.traceKafka {
+				h.logger.Debug("produce append success", "topic", topic.Name, "partition", part.Partition, "base_offset", result.BaseOffset, "last_offset", result.LastOffset)
+			}
 		}
 		topicResponses = append(topicResponses, protocol.ProduceTopicResponse{
 			Name:       topic.Name,
@@ -432,6 +465,7 @@ func newHandler(store metadata.Store, s3Client storage.S3Client, brokerInfo prot
 	cacheSize := parseEnvInt("KAFSCALE_CACHE_BYTES", 32<<20)
 	autoCreate := parseEnvBool("KAFSCALE_AUTO_CREATE_TOPICS", true)
 	autoPartitions := int32(parseEnvInt("KAFSCALE_AUTO_CREATE_PARTITIONS", 1))
+	traceKafka := parseEnvBool("KAFSCALE_TRACE_KAFKA", false)
 	if autoPartitions < 1 {
 		autoPartitions = 1
 	}
@@ -443,23 +477,11 @@ func newHandler(store metadata.Store, s3Client storage.S3Client, brokerInfo prot
 		ErrorCrit:   parseEnvFloat("KAFSCALE_S3_ERROR_RATE_CRIT", 0.6),
 	})
 	return &handler{
-		apiVersions: []protocol.ApiVersion{
-			{APIKey: protocol.APIKeyApiVersion, MinVersion: 0, MaxVersion: 0},
-			{APIKey: protocol.APIKeyMetadata, MinVersion: 0, MaxVersion: 0},
-			{APIKey: protocol.APIKeyProduce, MinVersion: 9, MaxVersion: 9},
-			{APIKey: protocol.APIKeyFetch, MinVersion: 13, MaxVersion: 13},
-			{APIKey: protocol.APIKeyFindCoordinator, MinVersion: 3, MaxVersion: 3},
-			{APIKey: protocol.APIKeyJoinGroup, MinVersion: 4, MaxVersion: 4},
-			{APIKey: protocol.APIKeySyncGroup, MinVersion: 4, MaxVersion: 4},
-			{APIKey: protocol.APIKeyHeartbeat, MinVersion: 4, MaxVersion: 4},
-			{APIKey: protocol.APIKeyLeaveGroup, MinVersion: 4, MaxVersion: 4},
-			{APIKey: protocol.APIKeyOffsetCommit, MinVersion: 3, MaxVersion: 3},
-			{APIKey: protocol.APIKeyOffsetFetch, MinVersion: 5, MaxVersion: 5},
-		},
-		store: store,
-		s3:    s3Client,
-		cache: cache.NewSegmentCache(cacheSize),
-		logs:  make(map[string]map[int32]*storage.PartitionLog),
+		apiVersions: generateApiVersions(),
+		store:       store,
+		s3:          s3Client,
+		cache:       cache.NewSegmentCache(cacheSize),
+		logs:        make(map[string]map[int32]*storage.PartitionLog),
 		logConfig: storage.PartitionLogConfig{
 			Buffer: storage.WriteBufferConfig{
 				MaxBytes:      4 << 20,
@@ -477,6 +499,51 @@ func newHandler(store metadata.Store, s3Client storage.S3Client, brokerInfo prot
 		logger:               logger.With("component", "handler"),
 		autoCreateTopics:     autoCreate,
 		autoCreatePartitions: autoPartitions,
+		traceKafka:           traceKafka,
+	}
+}
+
+func (h *handler) runStartupChecks(parent context.Context) error {
+	timeout := time.Duration(parseEnvInt("KAFSCALE_STARTUP_TIMEOUT_SEC", 30)) * time.Second
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	h.logger.Info("running startup checks", "timeout", timeout)
+	if err := h.verifyMetadata(ctx); err != nil {
+		return err
+	}
+	if err := h.verifyS3(ctx); err != nil {
+		return err
+	}
+	h.logger.Info("startup checks passed")
+	return nil
+}
+
+func (h *handler) verifyMetadata(ctx context.Context) error {
+	if _, err := h.store.Metadata(ctx, nil); err != nil {
+		return fmt.Errorf("metadata readiness check failed: %w", err)
+	}
+	return nil
+}
+
+func (h *handler) verifyS3(ctx context.Context) error {
+	payload := []byte("kafscale-startup-probe")
+	probeKey := fmt.Sprintf("__health/startup_probe_%d", time.Now().UnixNano())
+	backoff := 500 * time.Millisecond
+
+	for {
+		start := time.Now()
+		err := h.s3.UploadSegment(ctx, probeKey, payload)
+		h.recordS3Op("startup_probe", time.Since(start), err)
+		if err == nil {
+			return nil
+		}
+		h.logger.Warn("startup S3 probe failed, retrying", "error", err, "key", probeKey)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("s3 readiness check failed: %w", err)
+		case <-time.After(backoff):
+		}
 	}
 }
 
@@ -485,10 +552,14 @@ func main() {
 	defer cancel()
 
 	logger := newLogger()
-	store := buildStore(ctx, logger)
-	s3Client := buildS3Client(ctx, logger)
 	brokerInfo := buildBrokerInfo()
+	store := buildStore(ctx, brokerInfo, logger)
+	s3Client := buildS3Client(ctx, logger)
 	handler := newHandler(store, s3Client, brokerInfo, logger)
+	if err := handler.runStartupChecks(ctx); err != nil {
+		logger.Error("startup checks failed", "error", err)
+		os.Exit(1)
+	}
 	metricsAddr := envOrDefault("KAFSCALE_METRICS_ADDR", defaultMetricsAddr)
 	controlAddr := envOrDefault("KAFSCALE_CONTROL_ADDR", defaultControlAddr)
 	startMetricsServer(ctx, metricsAddr, handler, logger)
@@ -526,13 +597,13 @@ func buildS3Client(ctx context.Context, logger *slog.Logger) storage.S3Client {
 	return client
 }
 
-func defaultMetadata() metadata.ClusterMetadata {
+func metadataForBroker(broker protocol.MetadataBroker) metadata.ClusterMetadata {
 	clusterID := "kafscale-cluster"
 	return metadata.ClusterMetadata{
-		ControllerID: 1,
+		ControllerID: broker.NodeID,
 		ClusterID:    &clusterID,
 		Brokers: []protocol.MetadataBroker{
-			{NodeID: 1, Host: "localhost", Port: 19092},
+			broker,
 		},
 		Topics: []protocol.MetadataTopic{
 			{
@@ -542,9 +613,9 @@ func defaultMetadata() metadata.ClusterMetadata {
 					{
 						ErrorCode:      0,
 						PartitionIndex: 0,
-						LeaderID:       1,
-						ReplicaNodes:   []int32{1},
-						ISRNodes:       []int32{1},
+						LeaderID:       broker.NodeID,
+						ReplicaNodes:   []int32{broker.NodeID},
+						ISRNodes:       []int32{broker.NodeID},
 					},
 				},
 			},
@@ -552,8 +623,12 @@ func defaultMetadata() metadata.ClusterMetadata {
 	}
 }
 
-func buildStore(ctx context.Context, logger *slog.Logger) metadata.Store {
-	meta := defaultMetadata()
+func defaultMetadata() metadata.ClusterMetadata {
+	return metadataForBroker(buildBrokerInfo())
+}
+
+func buildStore(ctx context.Context, brokerInfo protocol.MetadataBroker, logger *slog.Logger) metadata.Store {
+	meta := metadataForBroker(brokerInfo)
 	endpoints := strings.TrimSpace(os.Getenv("KAFSCALE_ETCD_ENDPOINTS"))
 	if endpoints == "" {
 		return metadata.NewInMemoryStore(meta)
@@ -731,16 +806,85 @@ func parseEnvBool(name string, fallback bool) bool {
 	return fallback
 }
 
+type apiVersionSupport struct {
+	key                    int16
+	minVersion, maxVersion int16
+}
+
+func generateApiVersions() []protocol.ApiVersion {
+	supported := []apiVersionSupport{
+		{key: protocol.APIKeyApiVersion, minVersion: 0, maxVersion: 0},
+		{key: protocol.APIKeyMetadata, minVersion: 0, maxVersion: 0},
+		{key: protocol.APIKeyProduce, minVersion: 9, maxVersion: 9},
+		{key: protocol.APIKeyFetch, minVersion: 13, maxVersion: 13},
+		{key: protocol.APIKeyFindCoordinator, minVersion: 3, maxVersion: 3},
+		{key: protocol.APIKeyListOffsets, minVersion: 0, maxVersion: 0},
+		{key: protocol.APIKeyJoinGroup, minVersion: 4, maxVersion: 4},
+		{key: protocol.APIKeySyncGroup, minVersion: 4, maxVersion: 4},
+		{key: protocol.APIKeyHeartbeat, minVersion: 4, maxVersion: 4},
+		{key: protocol.APIKeyLeaveGroup, minVersion: 4, maxVersion: 4},
+		{key: protocol.APIKeyOffsetCommit, minVersion: 3, maxVersion: 3},
+		{key: protocol.APIKeyOffsetFetch, minVersion: 5, maxVersion: 5},
+		{key: protocol.APIKeyCreateTopics, minVersion: 0, maxVersion: 0},
+		{key: protocol.APIKeyDeleteTopics, minVersion: 0, maxVersion: 0},
+	}
+	unsupported := []int16{
+		4, 5, 6, 7,
+		15, 16,
+		21, 22,
+		24, 25, 26,
+		37,
+		protocol.APIKeyDescribeConfigs,
+		protocol.APIKeyDeleteGroups,
+	}
+
+	entries := make([]protocol.ApiVersion, 0, len(supported)+len(unsupported))
+	for _, entry := range supported {
+		entries = append(entries, protocol.ApiVersion{
+			APIKey:     entry.key,
+			MinVersion: entry.minVersion,
+			MaxVersion: entry.maxVersion,
+		})
+	}
+	for _, key := range unsupported {
+		entries = append(entries, protocol.ApiVersion{
+			APIKey:     key,
+			MinVersion: -1,
+			MaxVersion: -1,
+		})
+	}
+	return entries
+}
+
 func buildBrokerInfo() protocol.MetadataBroker {
 	id := parseEnvInt("KAFSCALE_BROKER_ID", 1)
 	host := os.Getenv("KAFSCALE_BROKER_HOST")
+	port := parseEnvInt("KAFSCALE_BROKER_PORT", defaultKafkaPort)
+	if addr := strings.TrimSpace(os.Getenv("KAFSCALE_BROKER_ADDR")); addr != "" {
+		parsedHost, parsedPort := parseBrokerAddr(addr)
+		if parsedHost != "" {
+			host = parsedHost
+		}
+		port = parsedPort
+	}
 	if host == "" {
 		host = "localhost"
 	}
-	port := parseEnvInt("KAFSCALE_BROKER_PORT", 19092)
 	return protocol.MetadataBroker{
 		NodeID: int32(id),
 		Host:   host,
 		Port:   int32(port),
 	}
+}
+
+func parseBrokerAddr(addr string) (string, int) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return strings.TrimSpace(addr), defaultKafkaPort
+	}
+	port := defaultKafkaPort
+	if parsedPort, err := strconv.Atoi(portStr); err == nil {
+		port = parsedPort
+	}
+	return host, port
 }

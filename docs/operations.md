@@ -44,6 +44,7 @@ The chart ships the `KafscaleCluster` and `KafscaleTopic` CRDs so the operator c
 - **TLS** – Brokers and the console ship HTTPS/TLS flags (`KAFSCALE_BROKER_TLS_*`, `KAFSCALE_CONSOLE_TLS_*`).  Mount certs as secrets via the Helm values and set the env vars to force TLS for client connections.
 - **Network policies** – If your cluster enforces policies, allow the operator + brokers to reach etcd and S3 endpoints and lock everything else down.
 - **Health / metrics** – Prometheus can scrape `/metrics` on the brokers and operator for early detection of S3 pressure or degraded nodes.  The console also renders the health state for on-call staff.
+- **Startup gating** – Broker pods exit immediately if they cannot read metadata or write a probe object to S3 during startup, so Kubernetes restarts them rather than leaving a stuck listener in place.
 
 ## Upgrades & Rollbacks
 

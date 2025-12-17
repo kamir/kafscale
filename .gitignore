@@ -18,6 +18,7 @@ coverage*.out
 
 # Local Go cache (use GOCACHE=.gocache for hermetic builds/tests)
 .gocache/
+.cache/
 
 # Go modules/vendor
 /vendor/

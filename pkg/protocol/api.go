@@ -16,6 +16,8 @@ const (
 	APIKeyCreateTopics    int16 = 19
 	APIKeyDeleteTopics    int16 = 20
 	APIKeyListOffsets     int16 = 2
+	APIKeyDescribeConfigs int16 = 32
+	APIKeyDeleteGroups    int16 = 42
 )
 
 // ApiVersion describes the supported version range for an API.
