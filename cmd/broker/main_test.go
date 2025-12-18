@@ -553,6 +553,10 @@ func (f *failingS3Client) DownloadSegment(ctx context.Context, key string, rng *
 	return nil, errors.New("unsupported")
 }
 
+func (f *failingS3Client) EnsureBucket(ctx context.Context) error {
+	return errors.New("s3 unavailable")
+}
+
 type failingMetadataStore struct {
 	metadata.Store
 	err error

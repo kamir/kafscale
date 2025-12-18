@@ -18,15 +18,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-const (
-	testS3Bucket    = "kafscale"
-	testS3Region    = "us-east-1"
-	testS3Endpoint  = "http://127.0.0.1:9000"
-	testS3PathStyle = "true"
-	testS3AccessKey = "minioadmin"
-	testS3SecretKey = "minioadmin"
-)
-
 func TestFranzGoProduceConsume(t *testing.T) {
 	if os.Getenv(enableEnv) != "1" {
 		t.Skipf("set %s=1 to run integration harness", enableEnv)
@@ -48,12 +39,6 @@ func TestFranzGoProduceConsume(t *testing.T) {
 		fmt.Sprintf("KAFSCALE_BROKER_ADDR=%s", brokerAddr),
 		fmt.Sprintf("KAFSCALE_METRICS_ADDR=%s", metricsAddr),
 		fmt.Sprintf("KAFSCALE_CONTROL_ADDR=%s", controlAddr),
-		fmt.Sprintf("KAFSCALE_S3_BUCKET=%s", testS3Bucket),
-		fmt.Sprintf("KAFSCALE_S3_REGION=%s", testS3Region),
-		fmt.Sprintf("KAFSCALE_S3_ENDPOINT=%s", testS3Endpoint),
-		fmt.Sprintf("KAFSCALE_S3_PATH_STYLE=%s", testS3PathStyle),
-		fmt.Sprintf("KAFSCALE_S3_ACCESS_KEY=%s", testS3AccessKey),
-		fmt.Sprintf("KAFSCALE_S3_SECRET_KEY=%s", testS3SecretKey),
 	)
 	var brokerLogs bytes.Buffer
 	var franzLogs bytes.Buffer

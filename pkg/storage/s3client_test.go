@@ -16,6 +16,8 @@ type fakeS3 struct {
 	getData   []byte
 	putErr    error
 	getErr    error
+	headErr   error
+	createErr error
 }
 
 func (f *fakeS3) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
@@ -33,9 +35,17 @@ func (f *fakeS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFn
 	}, nil
 }
 
+func (f *fakeS3) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	return &s3.HeadBucketOutput{}, f.headErr
+}
+
+func (f *fakeS3) CreateBucket(ctx context.Context, params *s3.CreateBucketInput, optFns ...func(*s3.Options)) (*s3.CreateBucketOutput, error) {
+	return &s3.CreateBucketOutput{}, f.createErr
+}
+
 func TestAWSS3Client_Upload(t *testing.T) {
 	api := &fakeS3{}
-	client := newAWSClientWithAPI("test-bucket", "arn:kms", api)
+	client := newAWSClientWithAPI("test-bucket", "us-east-1", "arn:kms", api)
 
 	err := client.UploadSegment(context.Background(), "topic/0/segment-0", []byte("payload"))
 	if err != nil {
@@ -55,7 +65,7 @@ func TestAWSS3Client_Upload(t *testing.T) {
 
 func TestAWSS3Client_Download(t *testing.T) {
 	api := &fakeS3{getData: []byte("hello")}
-	client := newAWSClientWithAPI("test-bucket", "", api)
+	client := newAWSClientWithAPI("test-bucket", "us-east-1", "", api)
 
 	rng := &ByteRange{Start: 0, End: 10}
 	data, err := client.DownloadSegment(context.Background(), "topic/segment", rng)

@@ -8,9 +8,10 @@ import (
 
 // MemoryS3Client is an in-memory implementation of S3Client for development/testing.
 type MemoryS3Client struct {
-	mu    sync.Mutex
-	data  map[string][]byte
-	index map[string][]byte
+	mu          sync.Mutex
+	data        map[string][]byte
+	index       map[string][]byte
+	bucketReady bool
 }
 
 // NewMemoryS3Client initializes the in-memory S3 client.
@@ -19,6 +20,13 @@ func NewMemoryS3Client() *MemoryS3Client {
 		data:  make(map[string][]byte),
 		index: make(map[string][]byte),
 	}
+}
+
+func (m *MemoryS3Client) EnsureBucket(ctx context.Context) error {
+	m.mu.Lock()
+	m.bucketReady = true
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *MemoryS3Client) UploadSegment(ctx context.Context, key string, body []byte) error {

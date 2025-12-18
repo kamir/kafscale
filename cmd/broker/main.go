@@ -627,6 +627,11 @@ func buildS3Client(ctx context.Context, logger *slog.Logger) storage.S3Client {
 		return storage.NewMemoryS3Client()
 	}
 
+	if err := client.EnsureBucket(ctx); err != nil {
+		logger.Error("failed to ensure S3 bucket", "bucket", bucket, "error", err)
+		os.Exit(1)
+	}
+
 	logger.Info("using AWS-compatible S3 client", "bucket", bucket, "region", region, "endpoint", endpoint, "force_path_style", forcePathStyle, "kms_configured", kmsARN != "", "default_minio", usingDefaultMinio, "credentials_provided", credsProvided)
 	return client
 }

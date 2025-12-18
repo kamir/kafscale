@@ -12,15 +12,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 type awsS3API interface {
 	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
+	CreateBucket(ctx context.Context, params *s3.CreateBucketInput, optFns ...func(*s3.Options)) (*s3.CreateBucketOutput, error)
 }
 
 type awsS3Client struct {
 	bucket string
+	region string
 	api    awsS3API
 	kmsKey string
 }
@@ -63,15 +67,69 @@ func NewS3Client(ctx context.Context, cfg S3Config) (S3Client, error) {
 		o.UsePathStyle = cfg.ForcePathStyle
 	})
 
-	return newAWSClientWithAPI(cfg.Bucket, cfg.KMSKeyARN, client), nil
+	return newAWSClientWithAPI(cfg.Bucket, cfg.Region, cfg.KMSKeyARN, client), nil
 }
 
-func newAWSClientWithAPI(bucket, kmsKey string, api awsS3API) S3Client {
+func newAWSClientWithAPI(bucket, region, kmsKey string, api awsS3API) S3Client {
 	return &awsS3Client{
 		bucket: bucket,
+		region: region,
 		api:    api,
 		kmsKey: kmsKey,
 	}
+}
+
+func (c *awsS3Client) EnsureBucket(ctx context.Context) error {
+	if err := c.headBucket(ctx); err == nil {
+		return nil
+	} else if !errors.Is(err, errBucketMissing) {
+		return err
+	}
+
+	input := &s3.CreateBucketInput{
+		Bucket: aws.String(c.bucket),
+	}
+	if cfg := c.bucketLocationConfig(); cfg != nil {
+		input.CreateBucketConfiguration = cfg
+	}
+	_, err := c.api.CreateBucket(ctx, input)
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "BucketAlreadyOwnedByYou", "BucketAlreadyExists":
+				return nil
+			}
+		}
+		return fmt.Errorf("create bucket %s: %w", c.bucket, err)
+	}
+	return nil
+}
+
+var errBucketMissing = errors.New("bucket missing")
+
+func (c *awsS3Client) headBucket(ctx context.Context) error {
+	_, err := c.api.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.bucket),
+	})
+	if err == nil {
+		return nil
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchBucket" {
+			return errBucketMissing
+		}
+	}
+	return fmt.Errorf("head bucket %s: %w", c.bucket, err)
+}
+
+func (c *awsS3Client) bucketLocationConfig() *types.CreateBucketConfiguration {
+	if c.region == "" || c.region == "us-east-1" {
+		return nil
+	}
+	constraint := types.BucketLocationConstraint(c.region)
+	return &types.CreateBucketConfiguration{LocationConstraint: constraint}
 }
 
 func (c *awsS3Client) UploadSegment(ctx context.Context, key string, body []byte) error {
