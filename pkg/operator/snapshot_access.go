@@ -56,11 +56,15 @@ func (r *ClusterReconciler) verifySnapshotS3Access(ctx context.Context, cluster 
 		return err
 	}
 
+	endpoint := strings.TrimSpace(os.Getenv(operatorEtcdSnapshotEndpointEnv))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(cluster.Spec.S3.Endpoint)
+	}
 	cfg := storage.S3Config{
 		Bucket:         bucket,
 		Region:         cluster.Spec.S3.Region,
-		Endpoint:       strings.TrimSpace(os.Getenv(operatorEtcdSnapshotEndpointEnv)),
-		ForcePathStyle: strings.TrimSpace(os.Getenv(operatorEtcdSnapshotEndpointEnv)) != "",
+		Endpoint:       endpoint,
+		ForcePathStyle: endpoint != "",
 	}
 	if err := r.loadS3Credentials(ctx, cluster, &cfg); err != nil {
 		r.recordSnapshotAccessFailure(ctx, cluster, clusterKey, err)

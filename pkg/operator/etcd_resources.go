@@ -255,6 +255,9 @@ func reconcileEtcdSnapshotCronJob(ctx context.Context, c client.Client, scheme *
 	prefix := getEnv(operatorEtcdSnapshotPrefixEnv, defaultSnapshotPrefix)
 	schedule := getEnv(operatorEtcdSnapshotScheduleEnv, defaultSnapshotSchedule)
 	endpoint := strings.TrimSpace(os.Getenv(operatorEtcdSnapshotEndpointEnv))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(cluster.Spec.S3.Endpoint)
+	}
 	etcdctlImage := getEnv(operatorEtcdSnapshotEtcdctlEnv, defaultEtcdImage)
 	backupImage := getEnv(operatorEtcdSnapshotImageEnv, defaultSnapshotImage)
 	createBucket := parseBoolEnv(operatorEtcdSnapshotCreateBucketEnv)
@@ -297,13 +300,16 @@ func reconcileEtcdSnapshotCronJob(ctx context.Context, c client.Client, scheme *
 			{
 				Name:  "snapshot",
 				Image: etcdctlImage,
-				Command: []string{
-					"/bin/sh",
-					"-c",
-					"ETCDCTL_API=3 etcdctl --endpoints=$ETCD_ENDPOINTS snapshot save /snapshots/etcd-snapshot.db",
-				},
 				Env: []corev1.EnvVar{
 					{Name: "ETCD_ENDPOINTS", Value: strings.Join(managedEtcdEndpoints(cluster), ",")},
+					{Name: "ETCDCTL_API", Value: "3"},
+				},
+				Command: []string{"etcdctl"},
+				Args: []string{
+					"--endpoints=$(ETCD_ENDPOINTS)",
+					"snapshot",
+					"save",
+					"/snapshots/etcd-snapshot.db",
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "snapshots", MountPath: "/snapshots"},
@@ -320,6 +326,41 @@ func reconcileEtcdSnapshotCronJob(ctx context.Context, c client.Client, scheme *
 		}
 		if endpoint != "" {
 			uploadEnv = append(uploadEnv, corev1.EnvVar{Name: "AWS_ENDPOINT_URL", Value: endpoint})
+		}
+		if strings.TrimSpace(cluster.Spec.S3.CredentialsSecretRef) != "" {
+			secretRef := corev1.LocalObjectReference{Name: cluster.Spec.S3.CredentialsSecretRef}
+			uploadEnv = append(uploadEnv,
+				corev1.EnvVar{
+					Name: "AWS_ACCESS_KEY_ID",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: secretRef,
+							Key:                  "KAFSCALE_S3_ACCESS_KEY",
+							Optional:             boolPtr(true),
+						},
+					},
+				},
+				corev1.EnvVar{
+					Name: "AWS_SECRET_ACCESS_KEY",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: secretRef,
+							Key:                  "KAFSCALE_S3_SECRET_KEY",
+							Optional:             boolPtr(true),
+						},
+					},
+				},
+				corev1.EnvVar{
+					Name: "AWS_SESSION_TOKEN",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: secretRef,
+							Key:                  "KAFSCALE_S3_SESSION_TOKEN",
+							Optional:             boolPtr(true),
+						},
+					},
+				},
+			)
 		}
 
 		cron.Spec.JobTemplate.Spec.Template.Spec.Containers = []corev1.Container{
@@ -345,7 +386,9 @@ func reconcileEtcdSnapshotCronJob(ctx context.Context, c client.Client, scheme *
 						"if [ \"$PROTECT_BUCKET\" = \"1\" ]; then\n" +
 						"  aws s3api head-bucket --bucket \"$SNAPSHOT_BUCKET\" >/dev/null\n" +
 						"  aws s3api put-bucket-versioning --bucket \"$SNAPSHOT_BUCKET\" --versioning-configuration Status=Enabled\n" +
-						"  aws s3api put-public-access-block --bucket \"$SNAPSHOT_BUCKET\" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true\n" +
+						"  if ! aws s3api put-public-access-block --bucket \"$SNAPSHOT_BUCKET\" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null 2>&1; then\n" +
+						"    echo \"public access block unsupported by endpoint; continuing\"\n" +
+						"  fi\n" +
 						"fi\n" +
 						"sha256sum \"$SNAPSHOT\" > \"$CHECKSUM\"\n" +
 						"aws s3 cp \"$SNAPSHOT\" \"s3://$SNAPSHOT_BUCKET/$SNAPSHOT_PREFIX/$TS.db\"\n" +
