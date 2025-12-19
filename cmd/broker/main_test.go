@@ -169,6 +169,54 @@ func TestHandleFetch(t *testing.T) {
 	}
 }
 
+func TestHandleFetchByTopicID(t *testing.T) {
+	store := metadata.NewInMemoryStore(defaultMetadata())
+	handler := newTestHandler(store)
+
+	produceReq := &protocol.ProduceRequest{
+		Acks:      -1,
+		TimeoutMs: 1000,
+		Topics: []protocol.ProduceTopic{
+			{
+				Name: "orders",
+				Partitions: []protocol.ProducePartition{
+					{
+						Partition: 0,
+						Records:   testBatchBytes(0, 0, 1),
+					},
+				},
+			},
+		},
+	}
+	if _, err := handler.handleProduce(context.Background(), &protocol.RequestHeader{CorrelationID: 1}, produceReq); err != nil {
+		t.Fatalf("handleProduce: %v", err)
+	}
+
+	fetchReq := &protocol.FetchRequest{
+		Topics: []protocol.FetchTopicRequest{
+			{
+				TopicID: metadata.TopicIDForName("orders"),
+				Partitions: []protocol.FetchPartitionRequest{
+					{
+						Partition:   0,
+						FetchOffset: 0,
+						MaxBytes:    1024,
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := handler.handleFetch(context.Background(), &protocol.RequestHeader{CorrelationID: 2, APIVersion: 13}, fetchReq)
+	if err != nil {
+		t.Fatalf("handleFetch: %v", err)
+	}
+	recordSet := decodeFetchResponseV13RecordSet(t, resp)
+	if len(recordSet) == 0 {
+		t.Fatalf("expected records for topic id fetch")
+	}
+}
+
 func TestAutoCreateTopicOnProduce(t *testing.T) {
 	store := metadata.NewInMemoryStore(metadata.ClusterMetadata{
 		ControllerID: 1,
@@ -569,6 +617,10 @@ func (f *failingS3Client) DownloadSegment(ctx context.Context, key string, rng *
 	return nil, errors.New("unsupported")
 }
 
+func (f *failingS3Client) DownloadIndex(ctx context.Context, key string) ([]byte, error) {
+	return nil, errors.New("unsupported")
+}
+
 func (f *failingS3Client) ListSegments(ctx context.Context, prefix string) ([]storage.S3Object, error) {
 	return nil, errors.New("unsupported")
 }
@@ -925,6 +977,144 @@ func decodeFetchResponse(t *testing.T, payload []byte) *protocol.FetchResponse {
 		resp.Topics = append(resp.Topics, topic)
 	}
 	return resp
+}
+
+func decodeFetchResponseV13RecordSet(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	reader := bytes.NewReader(payload)
+	var correlationID int32
+	if err := binary.Read(reader, binary.BigEndian, &correlationID); err != nil {
+		t.Fatalf("read correlation id: %v", err)
+	}
+	skipTaggedFields(t, reader)
+	var throttleMs int32
+	if err := binary.Read(reader, binary.BigEndian, &throttleMs); err != nil {
+		t.Fatalf("read throttle: %v", err)
+	}
+	var errorCode int16
+	if err := binary.Read(reader, binary.BigEndian, &errorCode); err != nil {
+		t.Fatalf("read error code: %v", err)
+	}
+	var sessionID int32
+	if err := binary.Read(reader, binary.BigEndian, &sessionID); err != nil {
+		t.Fatalf("read session id: %v", err)
+	}
+	topicCount := readCompactArrayLen(t, reader)
+	if topicCount <= 0 {
+		t.Fatalf("expected topic count, got %d", topicCount)
+	}
+	if _, err := readUUID(reader); err != nil {
+		t.Fatalf("read topic id: %v", err)
+	}
+	partitionCount := readCompactArrayLen(t, reader)
+	if partitionCount <= 0 {
+		t.Fatalf("expected partition count, got %d", partitionCount)
+	}
+	var partitionID int32
+	if err := binary.Read(reader, binary.BigEndian, &partitionID); err != nil {
+		t.Fatalf("read partition id: %v", err)
+	}
+	var partError int16
+	if err := binary.Read(reader, binary.BigEndian, &partError); err != nil {
+		t.Fatalf("read partition error: %v", err)
+	}
+	if partError != 0 {
+		t.Fatalf("expected partition error 0 got %d", partError)
+	}
+	var watermark int64
+	if err := binary.Read(reader, binary.BigEndian, &watermark); err != nil {
+		t.Fatalf("read high watermark: %v", err)
+	}
+	var lastStable int64
+	if err := binary.Read(reader, binary.BigEndian, &lastStable); err != nil {
+		t.Fatalf("read last stable: %v", err)
+	}
+	var logStart int64
+	if err := binary.Read(reader, binary.BigEndian, &logStart); err != nil {
+		t.Fatalf("read log start: %v", err)
+	}
+	abortedCount := readCompactArrayLen(t, reader)
+	for i := int32(0); i < abortedCount; i++ {
+		var producerID int64
+		if err := binary.Read(reader, binary.BigEndian, &producerID); err != nil {
+			t.Fatalf("read aborted producer id: %v", err)
+		}
+		var firstOffset int64
+		if err := binary.Read(reader, binary.BigEndian, &firstOffset); err != nil {
+			t.Fatalf("read aborted first offset: %v", err)
+		}
+	}
+	var preferredReadReplica int32
+	if err := binary.Read(reader, binary.BigEndian, &preferredReadReplica); err != nil {
+		t.Fatalf("read preferred replica: %v", err)
+	}
+	recordSet := readCompactBytes(t, reader)
+	skipTaggedFields(t, reader)
+	skipTaggedFields(t, reader)
+	skipTaggedFields(t, reader)
+	return recordSet
+}
+
+func readCompactArrayLen(t *testing.T, reader io.ByteReader) int32 {
+	t.Helper()
+	val, err := binary.ReadUvarint(reader)
+	if err != nil {
+		t.Fatalf("read uvarint: %v", err)
+	}
+	if val == 0 {
+		return -1
+	}
+	return int32(val - 1)
+}
+
+func readCompactBytes(t *testing.T, reader io.Reader) []byte {
+	t.Helper()
+	br, ok := reader.(io.ByteReader)
+	if !ok {
+		t.Fatalf("reader does not support ReadByte")
+	}
+	val, err := binary.ReadUvarint(br)
+	if err != nil {
+		t.Fatalf("read compact bytes length: %v", err)
+	}
+	if val == 0 {
+		return nil
+	}
+	length := int(val - 1)
+	buf := make([]byte, length)
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		t.Fatalf("read compact bytes: %v", err)
+	}
+	return buf
+}
+
+func skipTaggedFields(t *testing.T, reader io.ByteReader) {
+	t.Helper()
+	count, err := binary.ReadUvarint(reader)
+	if err != nil {
+		t.Fatalf("read tagged field count: %v", err)
+	}
+	for i := uint64(0); i < count; i++ {
+		if _, err := binary.ReadUvarint(reader); err != nil {
+			t.Fatalf("read tag: %v", err)
+		}
+		size, err := binary.ReadUvarint(reader)
+		if err != nil {
+			t.Fatalf("read tag size: %v", err)
+		}
+		if size == 0 {
+			continue
+		}
+		if _, err := io.CopyN(io.Discard, reader.(io.Reader), int64(size)); err != nil {
+			t.Fatalf("skip tag bytes: %v", err)
+		}
+	}
+}
+
+func readUUID(reader io.Reader) ([16]byte, error) {
+	var id [16]byte
+	_, err := io.ReadFull(reader, id[:])
+	return id, err
 }
 
 func TestMetricsHandlerExposesS3Health(t *testing.T) {

@@ -19,27 +19,34 @@ type MetadataBroker struct {
 
 // MetadataTopic describes a topic in Metadata response.
 type MetadataTopic struct {
-	ErrorCode  int16
-	Name       string
-	Partitions []MetadataPartition
+	ErrorCode                 int16
+	Name                      string
+	TopicID                   [16]byte
+	IsInternal                bool
+	Partitions                []MetadataPartition
+	TopicAuthorizedOperations int32
 }
 
 // MetadataPartition describes partition metadata.
 type MetadataPartition struct {
-	ErrorCode      int16
-	PartitionIndex int32
-	LeaderID       int32
-	ReplicaNodes   []int32
-	ISRNodes       []int32
+	ErrorCode       int16
+	PartitionIndex  int32
+	LeaderID        int32
+	LeaderEpoch     int32
+	ReplicaNodes    []int32
+	ISRNodes        []int32
+	OfflineReplicas []int32
 }
 
 // MetadataResponse holds topic + broker info.
 type MetadataResponse struct {
-	CorrelationID int32
-	Brokers       []MetadataBroker
-	ClusterID     *string
-	ControllerID  int32
-	Topics        []MetadataTopic
+	CorrelationID               int32
+	ThrottleMs                  int32
+	Brokers                     []MetadataBroker
+	ClusterID                   *string
+	ControllerID                int32
+	Topics                      []MetadataTopic
+	ClusterAuthorizedOperations int32
 }
 
 // ProduceResponse contains per-partition acknowledgement info.
@@ -73,6 +80,7 @@ type FetchResponse struct {
 
 type FetchTopicResponse struct {
 	Name       string
+	TopicID    [16]byte
 	Partitions []FetchPartitionResponse
 }
 
@@ -234,45 +242,137 @@ func EncodeApiVersionsResponse(resp *ApiVersionsResponse) ([]byte, error) {
 // EncodeMetadataResponse renders bytes for metadata responses. version should match
 // the Metadata request version that triggered this response.
 func EncodeMetadataResponse(resp *MetadataResponse, version int16) ([]byte, error) {
-	if version < 0 {
-		version = 0
+	if version < 0 || version > 12 {
+		return nil, fmt.Errorf("metadata response version %d not supported", version)
 	}
-
+	flexible := version >= 9
 	w := newByteWriter(256)
 	w.Int32(resp.CorrelationID)
-	w.Int32(int32(len(resp.Brokers)))
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	if version >= 3 {
+		w.Int32(resp.ThrottleMs)
+	}
+	if flexible {
+		w.CompactArrayLen(len(resp.Brokers))
+	} else {
+		w.Int32(int32(len(resp.Brokers)))
+	}
 	for _, b := range resp.Brokers {
 		w.Int32(b.NodeID)
-		w.String(b.Host)
+		if flexible {
+			w.CompactString(b.Host)
+		} else {
+			w.String(b.Host)
+		}
 		w.Int32(b.Port)
 		if version >= 1 {
-			w.NullableString(b.Rack)
+			if flexible {
+				w.CompactNullableString(b.Rack)
+			} else {
+				w.NullableString(b.Rack)
+			}
+		}
+		if flexible {
+			w.WriteTaggedFields(0)
 		}
 	}
 	if version >= 2 {
-		w.NullableString(resp.ClusterID)
+		if flexible {
+			w.CompactNullableString(resp.ClusterID)
+		} else {
+			w.NullableString(resp.ClusterID)
+		}
 	}
 	if version >= 1 {
 		w.Int32(resp.ControllerID)
 	}
-	w.Int32(int32(len(resp.Topics)))
+	if flexible {
+		w.CompactArrayLen(len(resp.Topics))
+	} else {
+		w.Int32(int32(len(resp.Topics)))
+	}
 	for _, t := range resp.Topics {
 		w.Int16(t.ErrorCode)
-		w.String(t.Name)
-		w.Int32(int32(len(t.Partitions)))
+		if version >= 10 {
+			var namePtr *string
+			if t.Name != "" {
+				namePtr = &t.Name
+			}
+			if flexible {
+				w.CompactNullableString(namePtr)
+			} else {
+				w.NullableString(namePtr)
+			}
+			w.UUID(t.TopicID)
+			if version >= 1 {
+				w.Bool(t.IsInternal)
+			}
+		} else {
+			if flexible {
+				w.CompactString(t.Name)
+			} else {
+				w.String(t.Name)
+			}
+			if version >= 1 {
+				w.Bool(t.IsInternal)
+			}
+		}
+		if flexible {
+			w.CompactArrayLen(len(t.Partitions))
+		} else {
+			w.Int32(int32(len(t.Partitions)))
+		}
 		for _, p := range t.Partitions {
 			w.Int16(p.ErrorCode)
 			w.Int32(p.PartitionIndex)
 			w.Int32(p.LeaderID)
-			w.Int32(int32(len(p.ReplicaNodes)))
+			if version >= 7 {
+				w.Int32(p.LeaderEpoch)
+			}
+			if flexible {
+				w.CompactArrayLen(len(p.ReplicaNodes))
+			} else {
+				w.Int32(int32(len(p.ReplicaNodes)))
+			}
 			for _, replica := range p.ReplicaNodes {
 				w.Int32(replica)
 			}
-			w.Int32(int32(len(p.ISRNodes)))
+			if flexible {
+				w.CompactArrayLen(len(p.ISRNodes))
+			} else {
+				w.Int32(int32(len(p.ISRNodes)))
+			}
 			for _, isr := range p.ISRNodes {
 				w.Int32(isr)
 			}
+			if version >= 5 {
+				if flexible {
+					w.CompactArrayLen(len(p.OfflineReplicas))
+				} else {
+					w.Int32(int32(len(p.OfflineReplicas)))
+				}
+				for _, offline := range p.OfflineReplicas {
+					w.Int32(offline)
+				}
+			}
+			if flexible {
+				w.WriteTaggedFields(0)
+			}
 		}
+		if version >= 8 {
+			w.Int32(t.TopicAuthorizedOperations)
+		}
+		if flexible {
+			w.WriteTaggedFields(0)
+		}
+	}
+	if version >= 8 {
+		w.Int32(resp.ClusterAuthorizedOperations)
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
 	}
 	return w.Bytes(), nil
 }
@@ -333,11 +433,15 @@ func EncodeProduceResponse(resp *ProduceResponse, version int16) ([]byte, error)
 
 // EncodeFetchResponse renders bytes for fetch responses.
 func EncodeFetchResponse(resp *FetchResponse, version int16) ([]byte, error) {
-	if version < 1 || version > 11 {
+	if version < 1 || version > 13 {
 		return nil, fmt.Errorf("fetch response version %d not supported", version)
 	}
+	flexible := version >= 12
 	w := newByteWriter(256)
 	w.Int32(resp.CorrelationID)
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
 	w.Int32(resp.ThrottleMs)
 	if version >= 7 {
 		w.Int16(resp.ErrorCode)
@@ -347,10 +451,22 @@ func EncodeFetchResponse(resp *FetchResponse, version int16) ([]byte, error) {
 			return nil, fmt.Errorf("fetch version %d cannot include session fields", version)
 		}
 	}
-	w.Int32(int32(len(resp.Topics)))
+	if flexible {
+		w.CompactArrayLen(len(resp.Topics))
+	} else {
+		w.Int32(int32(len(resp.Topics)))
+	}
 	for _, topic := range resp.Topics {
-		w.String(topic.Name)
-		w.Int32(int32(len(topic.Partitions)))
+		if flexible {
+			w.UUID(topic.TopicID)
+		} else {
+			w.String(topic.Name)
+		}
+		if flexible {
+			w.CompactArrayLen(len(topic.Partitions))
+		} else {
+			w.Int32(int32(len(topic.Partitions)))
+		}
 		for _, part := range topic.Partitions {
 			w.Int32(part.Partition)
 			w.Int16(part.ErrorCode)
@@ -362,7 +478,11 @@ func EncodeFetchResponse(resp *FetchResponse, version int16) ([]byte, error) {
 				w.Int64(part.LogStartOffset)
 			}
 			if version >= 4 {
-				w.Int32(int32(len(part.AbortedTransactions)))
+				if flexible {
+					w.CompactArrayLen(len(part.AbortedTransactions))
+				} else {
+					w.Int32(int32(len(part.AbortedTransactions)))
+				}
 				for _, aborted := range part.AbortedTransactions {
 					w.Int64(aborted.ProducerID)
 					w.Int64(aborted.FirstOffset)
@@ -371,13 +491,24 @@ func EncodeFetchResponse(resp *FetchResponse, version int16) ([]byte, error) {
 			if version >= 11 {
 				w.Int32(part.PreferredReadReplica)
 			}
-			if part.RecordSet == nil {
-				w.Int32(0)
+			if flexible {
+				w.CompactBytes(part.RecordSet)
+				w.WriteTaggedFields(0)
 			} else {
-				w.Int32(int32(len(part.RecordSet)))
-				w.write(part.RecordSet)
+				if part.RecordSet == nil {
+					w.Int32(0)
+				} else {
+					w.Int32(int32(len(part.RecordSet)))
+					w.write(part.RecordSet)
+				}
 			}
 		}
+		if flexible {
+			w.WriteTaggedFields(0)
+		}
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
 	}
 	return w.Bytes(), nil
 }

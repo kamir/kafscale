@@ -146,10 +146,17 @@ func cloneTopics(topics []protocol.MetadataTopic) []protocol.MetadataTopic {
 	}
 	out := make([]protocol.MetadataTopic, len(topics))
 	for i, topic := range topics {
+		topicID := topic.TopicID
+		if topicID == ([16]byte{}) {
+			topicID = TopicIDForName(topic.Name)
+		}
 		out[i] = protocol.MetadataTopic{
-			ErrorCode:  topic.ErrorCode,
-			Name:       topic.Name,
-			Partitions: clonePartitions(topic.Partitions),
+			ErrorCode:                 topic.ErrorCode,
+			Name:                      topic.Name,
+			TopicID:                   topicID,
+			IsInternal:                topic.IsInternal,
+			Partitions:                clonePartitions(topic.Partitions),
+			TopicAuthorizedOperations: topic.TopicAuthorizedOperations,
 		}
 	}
 	return out
@@ -162,11 +169,13 @@ func clonePartitions(parts []protocol.MetadataPartition) []protocol.MetadataPart
 	out := make([]protocol.MetadataPartition, len(parts))
 	for i, part := range parts {
 		out[i] = protocol.MetadataPartition{
-			ErrorCode:      part.ErrorCode,
-			PartitionIndex: part.PartitionIndex,
-			LeaderID:       part.LeaderID,
-			ReplicaNodes:   cloneInt32Slice(part.ReplicaNodes),
-			ISRNodes:       cloneInt32Slice(part.ISRNodes),
+			ErrorCode:       part.ErrorCode,
+			PartitionIndex:  part.PartitionIndex,
+			LeaderID:        part.LeaderID,
+			LeaderEpoch:     part.LeaderEpoch,
+			ReplicaNodes:    cloneInt32Slice(part.ReplicaNodes),
+			ISRNodes:        cloneInt32Slice(part.ISRNodes),
+			OfflineReplicas: cloneInt32Slice(part.OfflineReplicas),
 		}
 	}
 	return out
@@ -260,6 +269,8 @@ func (s *InMemoryStore) CreateTopic(ctx context.Context, spec TopicSpec) (*proto
 	}
 	newTopic := protocol.MetadataTopic{
 		Name:       spec.Name,
+		TopicID:    TopicIDForName(spec.Name),
+		IsInternal: false,
 		Partitions: partitions,
 	}
 	s.state.Topics = append(s.state.Topics, newTopic)

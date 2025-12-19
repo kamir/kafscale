@@ -56,6 +56,7 @@ type FetchRequest struct {
 
 type FetchTopicRequest struct {
 	Name       string
+	TopicID    [16]byte
 	Partitions []FetchPartitionRequest
 }
 
@@ -69,7 +70,11 @@ func (FetchRequest) APIKey() int16 { return APIKeyFetch }
 
 // MetadataRequest asks for cluster metadata. Empty Topics means "all".
 type MetadataRequest struct {
-	Topics []string
+	Topics                 []string
+	TopicIDs               [][16]byte
+	AllowAutoTopicCreation bool
+	IncludeClusterAuthOps  bool
+	IncludeTopicAuthOps    bool
 }
 
 func (MetadataRequest) APIKey() int16 { return APIKeyMetadata }
@@ -205,6 +210,10 @@ func isFlexibleRequest(apiKey, version int16) bool {
 	switch apiKey {
 	case APIKeyProduce:
 		return version >= 9
+	case APIKeyMetadata:
+		return version >= 9
+	case APIKeyFetch:
+		return version >= 12
 	case APIKeyFindCoordinator:
 		return version >= 3
 	case APIKeySyncGroup:
@@ -372,21 +381,93 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 		}
 	case APIKeyMetadata:
 		var topics []string
-		count, err := reader.Int32()
+		var topicIDs [][16]byte
+		var count int32
+		var err error
+		if flexible {
+			count, err = reader.CompactArrayLen()
+		} else {
+			count, err = reader.Int32()
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("read metadata topic count: %w", err)
 		}
 		if count >= 0 {
 			topics = make([]string, 0, count)
+			topicIDs = make([][16]byte, 0, count)
 			for i := int32(0); i < count; i++ {
-				name, err := reader.String()
-				if err != nil {
-					return nil, nil, fmt.Errorf("read metadata topic[%d]: %w", i, err)
+				if header.APIVersion >= 10 {
+					id, err := reader.UUID()
+					if err != nil {
+						return nil, nil, fmt.Errorf("read metadata topic[%d] id: %w", i, err)
+					}
+					var namePtr *string
+					if flexible {
+						namePtr, err = reader.CompactNullableString()
+					} else {
+						namePtr, err = reader.NullableString()
+					}
+					if err != nil {
+						return nil, nil, fmt.Errorf("read metadata topic[%d] name: %w", i, err)
+					}
+					if namePtr != nil {
+						topics = append(topics, *namePtr)
+					}
+					topicIDs = append(topicIDs, id)
+					if flexible {
+						if err := reader.SkipTaggedFields(); err != nil {
+							return nil, nil, fmt.Errorf("skip metadata topic[%d] tags: %w", i, err)
+						}
+					}
+				} else {
+					var name string
+					if flexible {
+						name, err = reader.CompactString()
+					} else {
+						name, err = reader.String()
+					}
+					if err != nil {
+						return nil, nil, fmt.Errorf("read metadata topic[%d]: %w", i, err)
+					}
+					topics = append(topics, name)
+					if flexible {
+						if err := reader.SkipTaggedFields(); err != nil {
+							return nil, nil, fmt.Errorf("skip metadata topic[%d] tags: %w", i, err)
+						}
+					}
 				}
-				topics = append(topics, name)
 			}
 		}
-		req = &MetadataRequest{Topics: topics}
+		allowAutoTopicCreation := true
+		if header.APIVersion >= 4 {
+			if allowAutoTopicCreation, err = reader.Bool(); err != nil {
+				return nil, nil, fmt.Errorf("read metadata allow auto topic creation: %w", err)
+			}
+		}
+		includeClusterAuthOps := false
+		includeTopicAuthOps := false
+		if header.APIVersion >= 8 && header.APIVersion <= 10 {
+			if includeClusterAuthOps, err = reader.Bool(); err != nil {
+				return nil, nil, fmt.Errorf("read metadata include cluster auth ops: %w", err)
+			}
+		}
+		if header.APIVersion >= 8 {
+			if includeTopicAuthOps, err = reader.Bool(); err != nil {
+				return nil, nil, fmt.Errorf("read metadata include topic auth ops: %w", err)
+			}
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip metadata tags: %w", err)
+			}
+		}
+		req = &MetadataRequest{
+			Topics:                 topics,
+			TopicIDs:               topicIDs,
+			AllowAutoTopicCreation: allowAutoTopicCreation,
+			IncludeClusterAuthOps:  includeClusterAuthOps,
+			IncludeTopicAuthOps:    includeTopicAuthOps,
+		}
 	case APIKeyCreateTopics:
 		topicCount, err := reader.Int32()
 		if err != nil {
@@ -495,27 +576,37 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		maxBytes, err := reader.Int32()
-		if err != nil {
-			return nil, nil, err
+		var maxBytes int32
+		if version >= 3 {
+			maxBytes, err = reader.Int32()
+			if err != nil {
+				return nil, nil, err
+			}
 		}
-		isolationLevel, err := reader.Int8()
-		if err != nil {
-			return nil, nil, err
+		isolationLevel := int8(0)
+		if version >= 4 {
+			if isolationLevel, err = reader.Int8(); err != nil {
+				return nil, nil, err
+			}
 		}
-		sessionID, err := reader.Int32()
-		if err != nil {
-			return nil, nil, err
-		}
-		sessionEpoch, err := reader.Int32()
-		if err != nil {
-			return nil, nil, err
+		sessionID := int32(0)
+		sessionEpoch := int32(0)
+		if version >= 7 {
+			if sessionID, err = reader.Int32(); err != nil {
+				return nil, nil, err
+			}
+			if sessionEpoch, err = reader.Int32(); err != nil {
+				return nil, nil, err
+			}
 		}
 		var topicCount int32
 		if flexible {
 			topicCount, err = compactArrayLenNonNull(reader)
 		} else {
 			topicCount, err = reader.Int32()
+			if topicCount < 0 {
+				return nil, nil, fmt.Errorf("fetch topic count invalid %d", topicCount)
+			}
 		}
 		if err != nil {
 			return nil, nil, err
@@ -523,20 +614,33 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 
 		topics := make([]FetchTopicRequest, 0, topicCount)
 		for i := int32(0); i < topicCount; i++ {
-			var name string
-			if flexible {
-				name, err = reader.CompactString()
+			var (
+				name    string
+				topicID [16]byte
+			)
+			if version >= 12 {
+				topicID, err = reader.UUID()
+				if err != nil {
+					return nil, nil, err
+				}
 			} else {
-				name, err = reader.String()
-			}
-			if err != nil {
-				return nil, nil, err
+				if flexible {
+					name, err = reader.CompactString()
+				} else {
+					name, err = reader.String()
+				}
+				if err != nil {
+					return nil, nil, err
+				}
 			}
 			var partCount int32
 			if flexible {
 				partCount, err = compactArrayLenNonNull(reader)
 			} else {
 				partCount, err = reader.Int32()
+				if partCount < 0 {
+					return nil, nil, fmt.Errorf("fetch partition count invalid %d", partCount)
+				}
 			}
 			if err != nil {
 				return nil, nil, err
@@ -575,14 +679,74 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 					FetchOffset: fetchOffset,
 					MaxBytes:    maxBytes,
 				})
+				if flexible {
+					if err := reader.SkipTaggedFields(); err != nil {
+						return nil, nil, fmt.Errorf("skip fetch partition tags: %w", err)
+					}
+				}
 			}
 			topics = append(topics, FetchTopicRequest{
 				Name:       name,
+				TopicID:    topicID,
 				Partitions: partitions,
 			})
 			if flexible {
 				if err := reader.SkipTaggedFields(); err != nil {
 					return nil, nil, fmt.Errorf("skip fetch topic tags: %w", err)
+				}
+			}
+		}
+		if version >= 7 {
+			var forgottenCount int32
+			if flexible {
+				forgottenCount, err = reader.CompactArrayLen()
+			} else {
+				forgottenCount, err = reader.Int32()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read forgotten topics count: %w", err)
+			}
+			if forgottenCount > 0 {
+				for i := int32(0); i < forgottenCount; i++ {
+					if version >= 12 {
+						if _, err := reader.UUID(); err != nil {
+							return nil, nil, fmt.Errorf("read forgotten topic id: %w", err)
+						}
+					} else {
+						if _, err := reader.String(); err != nil {
+							return nil, nil, fmt.Errorf("read forgotten topic name: %w", err)
+						}
+					}
+					var partCount int32
+					if flexible {
+						partCount, err = reader.CompactArrayLen()
+					} else {
+						partCount, err = reader.Int32()
+					}
+					if err != nil {
+						return nil, nil, fmt.Errorf("read forgotten partitions: %w", err)
+					}
+					for j := int32(0); j < partCount; j++ {
+						if _, err := reader.Int32(); err != nil {
+							return nil, nil, fmt.Errorf("read forgotten partition: %w", err)
+						}
+					}
+					if flexible {
+						if err := reader.SkipTaggedFields(); err != nil {
+							return nil, nil, fmt.Errorf("skip forgotten topic tags: %w", err)
+						}
+					}
+				}
+			}
+		}
+		if version >= 11 {
+			if flexible {
+				if _, err := reader.CompactNullableString(); err != nil {
+					return nil, nil, fmt.Errorf("read rack id: %w", err)
+				}
+			} else {
+				if _, err := reader.NullableString(); err != nil {
+					return nil, nil, fmt.Errorf("read rack id: %w", err)
 				}
 			}
 		}

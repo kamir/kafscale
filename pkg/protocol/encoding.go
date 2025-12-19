@@ -51,6 +51,16 @@ func (r *byteReader) Int64() (int64, error) {
 	return int64(binary.BigEndian.Uint64(b)), nil
 }
 
+func (r *byteReader) UUID() ([16]byte, error) {
+	b, err := r.read(16)
+	if err != nil {
+		return [16]byte{}, err
+	}
+	var id [16]byte
+	copy(id[:], b)
+	return id, nil
+}
+
 func (r *byteReader) Bool() (bool, error) {
 	b, err := r.read(1)
 	if err != nil {
@@ -167,6 +177,10 @@ func (w *byteWriter) Int64(v int64) {
 	var tmp [8]byte
 	binary.BigEndian.PutUint64(tmp[:], uint64(v))
 	w.write(tmp[:])
+}
+
+func (w *byteWriter) UUID(id [16]byte) {
+	w.write(id[:])
 }
 
 func (w *byteWriter) Bool(v bool) {

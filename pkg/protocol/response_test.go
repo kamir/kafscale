@@ -1,8 +1,11 @@
 package protocol
 
 import (
+	"encoding/binary"
 	"fmt"
 	"testing"
+
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 func strPtr(s string) *string {
@@ -31,6 +34,7 @@ func TestEncodeMetadataResponse(t *testing.T) {
 	clusterID := "cluster-1"
 	payload, err := EncodeMetadataResponse(&MetadataResponse{
 		CorrelationID: 5,
+		ThrottleMs:    0,
 		Brokers: []MetadataBroker{
 			{NodeID: 1, Host: "localhost", Port: 9092},
 		},
@@ -59,6 +63,122 @@ func TestEncodeMetadataResponse(t *testing.T) {
 	corr, _ := reader.Int32()
 	if corr != 5 {
 		t.Fatalf("unexpected correlation id %d", corr)
+	}
+}
+
+func TestEncodeMetadataResponseV10IncludesTopicID(t *testing.T) {
+	clusterID := "cluster-1"
+	var topicID [16]byte
+	for i := range topicID {
+		topicID[i] = byte(i + 1)
+	}
+	payload, err := EncodeMetadataResponse(&MetadataResponse{
+		CorrelationID: 7,
+		ThrottleMs:    0,
+		Brokers: []MetadataBroker{
+			{NodeID: 1, Host: "localhost", Port: 9092},
+		},
+		ClusterID:    &clusterID,
+		ControllerID: 1,
+		Topics: []MetadataTopic{
+			{
+				ErrorCode:  0,
+				Name:       "orders",
+				TopicID:    topicID,
+				IsInternal: false,
+				Partitions: []MetadataPartition{
+					{
+						ErrorCode:      0,
+						PartitionIndex: 0,
+						LeaderID:       1,
+						ReplicaNodes:   []int32{1},
+						ISRNodes:       []int32{1},
+					},
+				},
+			},
+		},
+	}, 10)
+	if err != nil {
+		t.Fatalf("EncodeMetadataResponse v10: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 7 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero header tags got %d", tags)
+	}
+	if _, err := reader.Int32(); err != nil { // throttle
+		t.Fatalf("read throttle: %v", err)
+	}
+	if brokers, _ := reader.CompactArrayLen(); brokers != 1 {
+		t.Fatalf("expected 1 broker got %d", brokers)
+	}
+	if _, err := reader.Int32(); err != nil {
+		t.Fatalf("read broker id: %v", err)
+	}
+	if host, _ := reader.CompactString(); host != "localhost" {
+		t.Fatalf("unexpected broker host %q", host)
+	}
+	reader.Int32() // port
+	if _, err := reader.CompactNullableString(); err != nil {
+		t.Fatalf("read rack: %v", err)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero broker tags got %d", tags)
+	}
+	if _, err := reader.CompactNullableString(); err != nil {
+		t.Fatalf("read cluster id: %v", err)
+	}
+	reader.Int32() // controller id
+	if topics, _ := reader.CompactArrayLen(); topics != 1 {
+		t.Fatalf("expected 1 topic got %d", topics)
+	}
+	reader.Int16() // error code
+	if name, _ := reader.CompactNullableString(); name == nil || *name != "orders" {
+		t.Fatalf("unexpected topic name %v", name)
+	}
+	id, err := reader.UUID()
+	if err != nil {
+		t.Fatalf("read topic id: %v", err)
+	}
+	if id != topicID {
+		t.Fatalf("unexpected topic id %v", id)
+	}
+	if internal, _ := reader.Bool(); internal {
+		t.Fatalf("expected non-internal topic")
+	}
+	if parts, _ := reader.CompactArrayLen(); parts != 1 {
+		t.Fatalf("expected 1 partition got %d", parts)
+	}
+	reader.Int16() // partition error
+	reader.Int32() // partition index
+	reader.Int32() // leader
+	reader.Int32() // leader epoch
+	if replicas, _ := reader.CompactArrayLen(); replicas != 1 {
+		t.Fatalf("expected 1 replica got %d", replicas)
+	}
+	reader.Int32()
+	if isr, _ := reader.CompactArrayLen(); isr != 1 {
+		t.Fatalf("expected 1 isr got %d", isr)
+	}
+	reader.Int32()
+	if offline, _ := reader.CompactArrayLen(); offline != 0 {
+		t.Fatalf("expected 0 offline replicas got %d", offline)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero partition tags got %d", tags)
+	}
+	reader.Int32() // authorized ops
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero topic tags got %d", tags)
+	}
+	reader.Int32() // cluster authorized ops
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero response tags got %d", tags)
+	}
+	if reader.remaining() != 0 {
+		t.Fatalf("unexpected trailing bytes: %d", reader.remaining())
 	}
 }
 
@@ -358,6 +478,166 @@ func TestEncodeFetchResponse(t *testing.T) {
 	}
 	if reader.remaining() != 0 {
 		t.Fatalf("unexpected trailing bytes %d", reader.remaining())
+	}
+}
+
+func TestEncodeFetchResponseV13(t *testing.T) {
+	var topicID [16]byte
+	for i := range topicID {
+		topicID[i] = byte(i + 1)
+	}
+	payload, err := EncodeFetchResponse(&FetchResponse{
+		CorrelationID: 11,
+		ThrottleMs:    1,
+		ErrorCode:     NONE,
+		SessionID:     2,
+		Topics: []FetchTopicResponse{
+			{
+				TopicID: topicID,
+				Partitions: []FetchPartitionResponse{
+					{
+						Partition:            0,
+						ErrorCode:            NONE,
+						HighWatermark:        5,
+						LastStableOffset:     5,
+						LogStartOffset:       0,
+						PreferredReadReplica: -1,
+						RecordSet:            []byte("records"),
+					},
+				},
+			},
+		},
+	}, 13)
+	if err != nil {
+		t.Fatalf("EncodeFetchResponse v13: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 11 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero header tags got %d", tags)
+	}
+	if throttle, _ := reader.Int32(); throttle != 1 {
+		t.Fatalf("unexpected throttle %d", throttle)
+	}
+	if errCode, _ := reader.Int16(); errCode != 0 {
+		t.Fatalf("unexpected error code %d", errCode)
+	}
+	if session, _ := reader.Int32(); session != 2 {
+		t.Fatalf("unexpected session id %d", session)
+	}
+	if topicCount, _ := reader.CompactArrayLen(); topicCount != 1 {
+		t.Fatalf("unexpected topic count %d", topicCount)
+	}
+	gotID, err := reader.UUID()
+	if err != nil {
+		t.Fatalf("read topic id: %v", err)
+	}
+	if gotID != topicID {
+		t.Fatalf("unexpected topic id %v", gotID)
+	}
+	if partCount, _ := reader.CompactArrayLen(); partCount != 1 {
+		t.Fatalf("unexpected partition count %d", partCount)
+	}
+	if partition, _ := reader.Int32(); partition != 0 {
+		t.Fatalf("unexpected partition %d", partition)
+	}
+	if perr, _ := reader.Int16(); perr != 0 {
+		t.Fatalf("unexpected partition error %d", perr)
+	}
+	if hw, _ := reader.Int64(); hw != 5 {
+		t.Fatalf("unexpected high watermark %d", hw)
+	}
+	if lso, _ := reader.Int64(); lso != 5 {
+		t.Fatalf("unexpected lso %d", lso)
+	}
+	if lsoff, _ := reader.Int64(); lsoff != 0 {
+		t.Fatalf("unexpected log start offset %d", lsoff)
+	}
+	if abortedCount, _ := reader.CompactArrayLen(); abortedCount != 0 {
+		t.Fatalf("unexpected aborted txns %d", abortedCount)
+	}
+	if pref, _ := reader.Int32(); pref != -1 {
+		t.Fatalf("unexpected preferred replica %d", pref)
+	}
+	recordSet, err := reader.CompactBytes()
+	if err != nil {
+		t.Fatalf("read record set: %v", err)
+	}
+	if string(recordSet) != "records" {
+		t.Fatalf("unexpected record set %q", recordSet)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero partition tags got %d", tags)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero topic tags got %d", tags)
+	}
+	if tags, _ := reader.UVarint(); tags != 0 {
+		t.Fatalf("expected zero response tags got %d", tags)
+	}
+	if reader.remaining() != 0 {
+		t.Fatalf("unexpected trailing bytes %d", reader.remaining())
+	}
+}
+
+func TestEncodeFetchResponseV13KmsgRoundTrip(t *testing.T) {
+	var topicID [16]byte
+	for i := range topicID {
+		topicID[i] = byte(i + 1)
+	}
+	recordSet := makeTestRecordBatch(2, 0)
+	payload, err := EncodeFetchResponse(&FetchResponse{
+		CorrelationID: 21,
+		ThrottleMs:    0,
+		ErrorCode:     NONE,
+		SessionID:     0,
+		Topics: []FetchTopicResponse{
+			{
+				TopicID: topicID,
+				Partitions: []FetchPartitionResponse{
+					{
+						Partition:            0,
+						ErrorCode:            NONE,
+						HighWatermark:        2,
+						LastStableOffset:     2,
+						LogStartOffset:       0,
+						PreferredReadReplica: -1,
+						RecordSet:            recordSet,
+					},
+				},
+			},
+		},
+	}, 13)
+	if err != nil {
+		t.Fatalf("EncodeFetchResponse v13: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 21 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if err := reader.SkipTaggedFields(); err != nil {
+		t.Fatalf("skip response header tags: %v", err)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrFetchResponse()
+	kmsgResp.Version = 13
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Topics) != 1 || len(kmsgResp.Topics[0].Partitions) != 1 {
+		t.Fatalf("unexpected topic/partition counts: %+v", kmsgResp.Topics)
+	}
+	if kmsgResp.Topics[0].TopicID != topicID {
+		t.Fatalf("unexpected topic id %v", kmsgResp.Topics[0].TopicID)
+	}
+	part := kmsgResp.Topics[0].Partitions[0]
+	if part.ErrorCode != 0 {
+		t.Fatalf("unexpected partition error %d", part.ErrorCode)
+	}
+	if len(part.RecordBatches) != len(recordSet) {
+		t.Fatalf("unexpected record batch length %d", len(part.RecordBatches))
 	}
 }
 
@@ -683,4 +963,14 @@ func TestEncodeOffsetFetchResponse(t *testing.T) {
 	if reader.remaining() != 0 {
 		t.Fatalf("unexpected trailing bytes %d", reader.remaining())
 	}
+}
+
+func makeTestRecordBatch(count int32, baseOffset int64) []byte {
+	const size = 90
+	data := make([]byte, size)
+	binary.BigEndian.PutUint64(data[0:8], uint64(baseOffset))
+	binary.BigEndian.PutUint32(data[8:12], uint32(size-12))
+	binary.BigEndian.PutUint32(data[23:27], uint32(count-1))
+	binary.BigEndian.PutUint32(data[57:61], uint32(count))
+	return data
 }

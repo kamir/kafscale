@@ -85,6 +85,8 @@ func BuildClusterMetadata(cluster *kafscalev1alpha1.KafscaleCluster, topics []ka
 		}
 		metaTopics = append(metaTopics, protocol.MetadataTopic{
 			Name:       topic.Name,
+			TopicID:    metadata.TopicIDForName(topic.Name),
+			IsInternal: false,
 			Partitions: partitions,
 		})
 	}

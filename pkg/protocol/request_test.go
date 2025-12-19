@@ -159,6 +159,141 @@ func TestParseProduceRequestFranzEncoding(t *testing.T) {
 	}
 }
 
+func TestParseFetchRequestV13(t *testing.T) {
+	var topicID [16]byte
+	for i := range topicID {
+		topicID[i] = byte(i + 1)
+	}
+	w := newByteWriter(256)
+	w.Int16(APIKeyFetch)
+	w.Int16(13)
+	w.Int32(9)
+	clientID := "client"
+	w.NullableString(&clientID)
+	w.WriteTaggedFields(0)
+	w.Int32(0)       // replica id
+	w.Int32(500)     // max wait ms
+	w.Int32(1)       // min bytes
+	w.Int32(1048576) // max bytes
+	w.Int8(0)        // isolation level
+	w.Int32(0)       // session id
+	w.Int32(0)       // session epoch
+	w.CompactArrayLen(1)
+	w.UUID(topicID)
+	w.CompactArrayLen(1)
+	w.Int32(0)  // partition
+	w.Int32(-1) // current leader epoch
+	w.Int64(0)  // fetch offset
+	w.Int32(-1) // last fetched epoch
+	w.Int64(0)  // log start offset
+	w.Int32(1048576)
+	w.WriteTaggedFields(0) // partition tags
+	w.WriteTaggedFields(0) // topic tags
+	w.CompactArrayLen(0)   // forgotten topics
+	w.CompactNullableString(nil)
+	w.WriteTaggedFields(0) // request tags
+
+	header, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	if header.APIKey != APIKeyFetch || header.APIVersion != 13 {
+		t.Fatalf("unexpected header: %#v", header)
+	}
+	fetchReq, ok := req.(*FetchRequest)
+	if !ok {
+		t.Fatalf("expected FetchRequest got %T", req)
+	}
+	if len(fetchReq.Topics) != 1 {
+		t.Fatalf("expected 1 topic got %d", len(fetchReq.Topics))
+	}
+	if fetchReq.Topics[0].TopicID != topicID {
+		t.Fatalf("unexpected topic id %v", fetchReq.Topics[0].TopicID)
+	}
+	if fetchReq.Topics[0].Name != "" {
+		t.Fatalf("expected empty topic name got %q", fetchReq.Topics[0].Name)
+	}
+	if len(fetchReq.Topics[0].Partitions) != 1 {
+		t.Fatalf("expected 1 partition got %d", len(fetchReq.Topics[0].Partitions))
+	}
+}
+
+func TestParseMetadataRequestV12TaggedFields(t *testing.T) {
+	w := newByteWriter(128)
+	w.Int16(APIKeyMetadata)
+	w.Int16(12)
+	w.Int32(42)
+	clientID := "kgo"
+	w.NullableString(&clientID)
+	w.WriteTaggedFields(0)
+	w.CompactArrayLen(2)
+	w.UUID([16]byte{})
+	w.CompactNullableString(strPtr("orders-0"))
+	w.WriteTaggedFields(0)
+	w.UUID([16]byte{})
+	w.CompactNullableString(strPtr("orders-1"))
+	w.WriteTaggedFields(0)
+	w.Bool(true)
+	w.Bool(false)
+	w.WriteTaggedFields(0)
+
+	header, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	if header.APIKey != APIKeyMetadata || header.APIVersion != 12 {
+		t.Fatalf("unexpected header: %#v", header)
+	}
+	metaReq, ok := req.(*MetadataRequest)
+	if !ok {
+		t.Fatalf("expected MetadataRequest got %T", req)
+	}
+	if len(metaReq.Topics) != 2 {
+		t.Fatalf("expected 2 topics got %d", len(metaReq.Topics))
+	}
+	if !metaReq.AllowAutoTopicCreation {
+		t.Fatalf("expected allow auto topic creation true")
+	}
+	if metaReq.IncludeClusterAuthOps || metaReq.IncludeTopicAuthOps {
+		t.Fatalf("expected auth ops false")
+	}
+}
+
+func TestParseMetadataRequestFranzEncoding(t *testing.T) {
+	req := kmsg.NewPtrMetadataRequest()
+	req.Version = 12
+	req.AllowAutoTopicCreation = true
+	req.IncludeTopicAuthorizedOperations = false
+	req.Topics = []kmsg.MetadataRequestTopic{
+		{Topic: strPtr("orders-3eb53935-0")},
+	}
+
+	formatter := kmsg.NewRequestFormatter(kmsg.FormatterClientID("kgo"))
+	payload := formatter.AppendRequest(nil, req, 1)
+	payload = payload[4:] // drop the length prefix to match ParseRequest input
+
+	header, parsed, err := ParseRequest(payload)
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	if header.APIKey != APIKeyMetadata || header.APIVersion != 12 {
+		t.Fatalf("unexpected header: %#v", header)
+	}
+	metaReq, ok := parsed.(*MetadataRequest)
+	if !ok {
+		t.Fatalf("expected MetadataRequest got %T", parsed)
+	}
+	if len(metaReq.Topics) != 1 || metaReq.Topics[0] != "orders-3eb53935-0" {
+		t.Fatalf("unexpected topics: %#v", metaReq.Topics)
+	}
+	if !metaReq.AllowAutoTopicCreation {
+		t.Fatalf("expected allow auto topic creation true")
+	}
+	if metaReq.IncludeClusterAuthOps || metaReq.IncludeTopicAuthOps {
+		t.Fatalf("expected auth ops false")
+	}
+}
+
 func TestParseFindCoordinatorFlexible(t *testing.T) {
 	req := kmsg.NewPtrFindCoordinatorRequest()
 	req.Version = 3
@@ -289,7 +424,7 @@ func TestParseSyncGroupFlexible(t *testing.T) {
 func TestParseFetchRequest(t *testing.T) {
 	w := newByteWriter(128)
 	w.Int16(APIKeyFetch)
-	w.Int16(13)
+	w.Int16(11)
 	w.Int32(9) // correlation
 	clientID := "consumer"
 	w.NullableString(&clientID)
@@ -306,9 +441,10 @@ func TestParseFetchRequest(t *testing.T) {
 	w.Int32(0) // partition
 	w.Int32(0) // leader epoch
 	w.Int64(0) // fetch offset
-	w.Int64(0) // last fetched epoch
 	w.Int64(0) // log start offset
 	w.Int32(1024)
+	w.Int32(0) // forgotten topics count
+	w.NullableString(nil)
 
 	header, req, err := ParseRequest(w.Bytes())
 	if err != nil {

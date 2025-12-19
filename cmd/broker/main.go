@@ -80,7 +80,7 @@ func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, re
 	case *protocol.MetadataRequest:
 		metaReq := req.(*protocol.MetadataRequest)
 		if h.traceKafka {
-			h.logger.Debug("metadata request", "topics", metaReq.Topics)
+			h.logger.Debug("metadata request", "topics", metaReq.Topics, "topic_ids", len(metaReq.TopicIDs))
 		}
 		if h.autoCreateTopics && len(metaReq.Topics) > 0 {
 			for _, name := range metaReq.Topics {
@@ -92,12 +92,53 @@ func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, re
 				}
 			}
 		}
-		meta, err := h.store.Metadata(ctx, metaReq.Topics)
+		meta, err := func() (*metadata.ClusterMetadata, error) {
+			zeroID := [16]byte{}
+			useIDs := false
+			for _, id := range metaReq.TopicIDs {
+				if id != zeroID {
+					useIDs = true
+					break
+				}
+			}
+			if !useIDs {
+				return h.store.Metadata(ctx, metaReq.Topics)
+			}
+			all, err := h.store.Metadata(ctx, nil)
+			if err != nil {
+				return nil, err
+			}
+			index := make(map[[16]byte]protocol.MetadataTopic, len(all.Topics))
+			for _, topic := range all.Topics {
+				index[topic.TopicID] = topic
+			}
+			filtered := make([]protocol.MetadataTopic, 0, len(metaReq.TopicIDs))
+			for _, id := range metaReq.TopicIDs {
+				if id == zeroID {
+					continue
+				}
+				if topic, ok := index[id]; ok {
+					filtered = append(filtered, topic)
+				} else {
+					filtered = append(filtered, protocol.MetadataTopic{
+						ErrorCode: protocol.UNKNOWN_TOPIC_ID,
+						TopicID:   id,
+					})
+				}
+			}
+			return &metadata.ClusterMetadata{
+				Brokers:      all.Brokers,
+				ClusterID:    all.ClusterID,
+				ControllerID: all.ControllerID,
+				Topics:       filtered,
+			}, nil
+		}()
 		if err != nil {
 			return nil, fmt.Errorf("load metadata: %w", err)
 		}
 		resp := &protocol.MetadataResponse{
 			CorrelationID: header.CorrelationID,
+			ThrottleMs:    0,
 			Brokers:       meta.Brokers,
 			ClusterID:     meta.ClusterID,
 			ControllerID:  meta.ControllerID,
@@ -407,7 +448,7 @@ func (h *handler) handleListOffsets(ctx context.Context, header *protocol.Reques
 }
 
 func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeader, req *protocol.FetchRequest) ([]byte, error) {
-	if header.APIVersion != 11 {
+	if header.APIVersion < 11 || header.APIVersion > 13 {
 		return nil, fmt.Errorf("fetch version %d not supported", header.APIVersion)
 	}
 	topicResponses := make([]protocol.FetchTopicResponse, 0, len(req.Topics))
@@ -416,12 +457,46 @@ func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeade
 		maxWait = 0
 	}
 	var fetchedMessages int64
+	zeroID := [16]byte{}
+	idToName := map[[16]byte]string{}
+	for _, topic := range req.Topics {
+		if topic.TopicID != zeroID {
+			meta, err := h.store.Metadata(ctx, nil)
+			if err != nil {
+				return nil, fmt.Errorf("load metadata: %w", err)
+			}
+			for _, t := range meta.Topics {
+				idToName[t.TopicID] = t.Name
+			}
+			break
+		}
+	}
 
 	for _, topic := range req.Topics {
+		topicName := topic.Name
+		if topicName == "" && topic.TopicID != zeroID {
+			if resolved, ok := idToName[topic.TopicID]; ok {
+				topicName = resolved
+			} else {
+				partitionResponses := make([]protocol.FetchPartitionResponse, 0, len(topic.Partitions))
+				for _, part := range topic.Partitions {
+					partitionResponses = append(partitionResponses, protocol.FetchPartitionResponse{
+						Partition: part.Partition,
+						ErrorCode: protocol.UNKNOWN_TOPIC_ID,
+					})
+				}
+				topicResponses = append(topicResponses, protocol.FetchTopicResponse{
+					Name:       topicName,
+					TopicID:    topic.TopicID,
+					Partitions: partitionResponses,
+				})
+				continue
+			}
+		}
 		partitionResponses := make([]protocol.FetchPartitionResponse, 0, len(topic.Partitions))
 		for _, part := range topic.Partitions {
 			if h.traceKafka {
-				h.logger.Debug("fetch partition request", "topic", topic.Name, "partition", part.Partition, "fetch_offset", part.FetchOffset, "max_bytes", part.MaxBytes)
+				h.logger.Debug("fetch partition request", "topic", topicName, "partition", part.Partition, "fetch_offset", part.FetchOffset, "max_bytes", part.MaxBytes)
 			}
 			switch h.s3Health.State() {
 			case broker.S3StateDegraded, broker.S3StateUnavailable:
@@ -431,7 +506,7 @@ func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeade
 				})
 				continue
 			}
-			plog, err := h.getPartitionLog(ctx, topic.Name, part.Partition)
+			plog, err := h.getPartitionLog(ctx, topicName, part.Partition)
 			if err != nil {
 				partitionResponses = append(partitionResponses, protocol.FetchPartitionResponse{
 					Partition: part.Partition,
@@ -439,7 +514,7 @@ func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeade
 				})
 				continue
 			}
-			nextOffset, offsetErr := h.waitForFetchData(ctx, topic.Name, part.Partition, part.FetchOffset, maxWait)
+			nextOffset, offsetErr := h.waitForFetchData(ctx, topicName, part.Partition, part.FetchOffset, maxWait)
 			if offsetErr != nil {
 				if errors.Is(offsetErr, context.Canceled) || errors.Is(offsetErr, context.DeadlineExceeded) {
 					partitionResponses = append(partitionResponses, protocol.FetchPartitionResponse{
@@ -466,7 +541,7 @@ func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeade
 					} else {
 						errorCode = h.backpressureErrorCode()
 						if h.traceKafka {
-							h.logger.Debug("fetch read error", "topic", topic.Name, "partition", part.Partition, "error", err)
+							h.logger.Debug("fetch read error", "topic", topicName, "partition", part.Partition, "error", err)
 						}
 					}
 				}
@@ -475,13 +550,13 @@ func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeade
 			highWatermark := nextOffset
 			if errorCode == 0 {
 				if h.traceKafka {
-					h.logger.Debug("fetch partition response", "topic", topic.Name, "partition", part.Partition, "records_bytes", len(recordSet), "high_watermark", highWatermark)
+					h.logger.Debug("fetch partition response", "topic", topicName, "partition", part.Partition, "records_bytes", len(recordSet), "high_watermark", highWatermark)
 				}
 				if len(recordSet) > 0 {
 					fetchedMessages += int64(storage.CountRecordBatchMessages(recordSet))
 				}
 			} else if h.traceKafka {
-				h.logger.Debug("fetch partition error", "topic", topic.Name, "partition", part.Partition, "error_code", errorCode)
+				h.logger.Debug("fetch partition error", "topic", topicName, "partition", part.Partition, "error_code", errorCode)
 			}
 			partitionResponses = append(partitionResponses, protocol.FetchPartitionResponse{
 				Partition:            part.Partition,
@@ -494,7 +569,8 @@ func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeade
 			})
 		}
 		topicResponses = append(topicResponses, protocol.FetchTopicResponse{
-			Name:       topic.Name,
+			Name:       topicName,
+			TopicID:    topic.TopicID,
 			Partitions: partitionResponses,
 		})
 	}
@@ -784,8 +860,10 @@ func metadataForBroker(broker protocol.MetadataBroker) metadata.ClusterMetadata 
 		},
 		Topics: []protocol.MetadataTopic{
 			{
-				ErrorCode: 0,
-				Name:      "orders",
+				ErrorCode:  0,
+				Name:       "orders",
+				TopicID:    metadata.TopicIDForName("orders"),
+				IsInternal: false,
 				Partitions: []protocol.MetadataPartition{
 					{
 						ErrorCode:      0,
@@ -991,9 +1069,9 @@ type apiVersionSupport struct {
 func generateApiVersions() []protocol.ApiVersion {
 	supported := []apiVersionSupport{
 		{key: protocol.APIKeyApiVersion, minVersion: 0, maxVersion: 0},
-		{key: protocol.APIKeyMetadata, minVersion: 0, maxVersion: 0},
+		{key: protocol.APIKeyMetadata, minVersion: 0, maxVersion: 12},
 		{key: protocol.APIKeyProduce, minVersion: 0, maxVersion: 9},
-		{key: protocol.APIKeyFetch, minVersion: 11, maxVersion: 11},
+		{key: protocol.APIKeyFetch, minVersion: 11, maxVersion: 13},
 		{key: protocol.APIKeyFindCoordinator, minVersion: 3, maxVersion: 3},
 		{key: protocol.APIKeyListOffsets, minVersion: 0, maxVersion: 0},
 		{key: protocol.APIKeyJoinGroup, minVersion: 4, maxVersion: 4},
