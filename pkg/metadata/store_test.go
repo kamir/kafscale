@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
 )
 
@@ -133,6 +134,42 @@ func TestInMemoryStoreOffsets(t *testing.T) {
 	}
 	if offset != 10 {
 		t.Fatalf("expected offset 10 got %d", offset)
+	}
+}
+
+func TestInMemoryStoreConsumerGroups(t *testing.T) {
+	store := NewInMemoryStore(ClusterMetadata{})
+	group := &metadatapb.ConsumerGroup{
+		GroupId:      "group-1",
+		State:        "stable",
+		ProtocolType: "consumer",
+		Protocol:     "range",
+		Leader:       "member-1",
+		GenerationId: 2,
+		Members: map[string]*metadatapb.GroupMember{
+			"member-1": {
+				Subscriptions: []string{"orders"},
+				Assignments: []*metadatapb.Assignment{
+					{Topic: "orders", Partitions: []int32{0}},
+				},
+			},
+		},
+	}
+	if err := store.PutConsumerGroup(context.Background(), group); err != nil {
+		t.Fatalf("PutConsumerGroup: %v", err)
+	}
+	loaded, err := store.FetchConsumerGroup(context.Background(), "group-1")
+	if err != nil {
+		t.Fatalf("FetchConsumerGroup: %v", err)
+	}
+	if loaded == nil || loaded.GenerationId != 2 || loaded.Leader != "member-1" {
+		t.Fatalf("unexpected group data: %#v", loaded)
+	}
+	if err := store.DeleteConsumerGroup(context.Background(), "group-1"); err != nil {
+		t.Fatalf("DeleteConsumerGroup: %v", err)
+	}
+	if loaded, err := store.FetchConsumerGroup(context.Background(), "group-1"); err != nil || loaded != nil {
+		t.Fatalf("expected group deletion, got %#v err=%v", loaded, err)
 	}
 }
 

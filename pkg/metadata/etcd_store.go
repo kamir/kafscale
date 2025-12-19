@@ -11,6 +11,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
 )
 
@@ -148,6 +149,43 @@ func (s *EtcdStore) FetchConsumerOffset(ctx context.Context, group, topic string
 		return 0, "", err
 	}
 	return rec.Offset, rec.Metadata, nil
+}
+
+// PutConsumerGroup persists consumer group metadata in etcd.
+func (s *EtcdStore) PutConsumerGroup(ctx context.Context, group *metadatapb.ConsumerGroup) error {
+	if group == nil || group.GroupId == "" {
+		return errors.New("consumer group id required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	payload, err := EncodeConsumerGroup(group)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.Put(ctx, ConsumerGroupKey(group.GroupId), string(payload))
+	return err
+}
+
+// FetchConsumerGroup loads consumer group metadata from etcd.
+func (s *EtcdStore) FetchConsumerGroup(ctx context.Context, groupID string) (*metadatapb.ConsumerGroup, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resp, err := s.client.Get(ctx, ConsumerGroupKey(groupID))
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Kvs) == 0 {
+		return nil, nil
+	}
+	return DecodeConsumerGroup(resp.Kvs[0].Value)
+}
+
+// DeleteConsumerGroup removes persisted consumer group metadata.
+func (s *EtcdStore) DeleteConsumerGroup(ctx context.Context, groupID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, err := s.client.Delete(ctx, ConsumerGroupKey(groupID))
+	return err
 }
 
 // CreateTopic currently updates only the in-memory snapshot; the operator is still responsible

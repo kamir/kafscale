@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
 )
 
@@ -23,6 +24,12 @@ type Store interface {
 	CommitConsumerOffset(ctx context.Context, group, topic string, partition int32, offset int64, metadata string) error
 	// FetchConsumerOffset retrieves the committed offset for a consumer group partition.
 	FetchConsumerOffset(ctx context.Context, group, topic string, partition int32) (int64, string, error)
+	// PutConsumerGroup persists consumer group metadata.
+	PutConsumerGroup(ctx context.Context, group *metadatapb.ConsumerGroup) error
+	// FetchConsumerGroup retrieves consumer group metadata.
+	FetchConsumerGroup(ctx context.Context, groupID string) (*metadatapb.ConsumerGroup, error)
+	// DeleteConsumerGroup removes consumer group metadata.
+	DeleteConsumerGroup(ctx context.Context, groupID string) error
 	// CreateTopic creates a new topic with the provided specification.
 	CreateTopic(ctx context.Context, spec TopicSpec) (*protocol.MetadataTopic, error)
 	// DeleteTopic removes a topic and associated offsets.
@@ -60,6 +67,7 @@ type InMemoryStore struct {
 	offsets         map[string]int64
 	consumerOffsets map[string]int64
 	consumerMeta    map[string]string
+	consumerGroups  map[string]*metadatapb.ConsumerGroup
 }
 
 // NewInMemoryStore builds an in-memory metadata store with the provided state.
@@ -69,6 +77,7 @@ func NewInMemoryStore(state ClusterMetadata) *InMemoryStore {
 		offsets:         make(map[string]int64),
 		consumerOffsets: make(map[string]int64),
 		consumerMeta:    make(map[string]string),
+		consumerGroups:  make(map[string]*metadatapb.ConsumerGroup),
 	}
 }
 
@@ -353,6 +362,84 @@ func (s *InMemoryStore) FetchConsumerOffset(ctx context.Context, group, topic st
 	defer s.mu.RUnlock()
 	key := consumerKey(group, topic, partition)
 	return s.consumerOffsets[key], s.consumerMeta[key], nil
+}
+
+// PutConsumerGroup implements Store.PutConsumerGroup.
+func (s *InMemoryStore) PutConsumerGroup(ctx context.Context, group *metadatapb.ConsumerGroup) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if group == nil || group.GroupId == "" {
+		return errors.New("consumer group id required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.consumerGroups[group.GroupId] = cloneConsumerGroup(group)
+	return nil
+}
+
+// FetchConsumerGroup implements Store.FetchConsumerGroup.
+func (s *InMemoryStore) FetchConsumerGroup(ctx context.Context, groupID string) (*metadatapb.ConsumerGroup, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if group, ok := s.consumerGroups[groupID]; ok {
+		return cloneConsumerGroup(group), nil
+	}
+	return nil, nil
+}
+
+// DeleteConsumerGroup implements Store.DeleteConsumerGroup.
+func (s *InMemoryStore) DeleteConsumerGroup(ctx context.Context, groupID string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.consumerGroups, groupID)
+	return nil
+}
+
+func cloneConsumerGroup(group *metadatapb.ConsumerGroup) *metadatapb.ConsumerGroup {
+	if group == nil {
+		return nil
+	}
+	out := &metadatapb.ConsumerGroup{
+		GroupId:      group.GroupId,
+		State:        group.State,
+		ProtocolType: group.ProtocolType,
+		Protocol:     group.Protocol,
+		Leader:       group.Leader,
+		GenerationId: group.GenerationId,
+		Members:      make(map[string]*metadatapb.GroupMember, len(group.Members)),
+	}
+	for memberID, member := range group.Members {
+		cloned := &metadatapb.GroupMember{
+			ClientId:      member.ClientId,
+			ClientHost:    member.ClientHost,
+			HeartbeatAt:   member.HeartbeatAt,
+			Subscriptions: append([]string(nil), member.Subscriptions...),
+		}
+		if len(member.Assignments) > 0 {
+			cloned.Assignments = make([]*metadatapb.Assignment, 0, len(member.Assignments))
+			for _, assignment := range member.Assignments {
+				cloned.Assignments = append(cloned.Assignments, &metadatapb.Assignment{
+					Topic:      assignment.Topic,
+					Partitions: append([]int32(nil), assignment.Partitions...),
+				})
+			}
+		}
+		out.Members[memberID] = cloned
+	}
+	return out
 }
 
 var (

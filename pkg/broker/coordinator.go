@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
 )
@@ -26,6 +27,14 @@ const (
 	groupStateCompletingRebalance
 	groupStateStable
 	groupStateDead
+)
+
+const (
+	groupStateEmptyStr      = "empty"
+	groupStatePreparingStr  = "preparing_rebalance"
+	groupStateCompletingStr = "completing_rebalance"
+	groupStateStableStr     = "stable"
+	groupStateDeadStr       = "dead"
 )
 
 type GroupCoordinator struct {
@@ -100,9 +109,11 @@ func (c *GroupCoordinator) FindCoordinatorResponse(correlationID int32, errorCod
 
 func (c *GroupCoordinator) JoinGroup(ctx context.Context, req *protocol.JoinGroupRequest, correlationID int32) (*protocol.JoinGroupResponse, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	state := c.ensureGroup(req.GroupID)
+	state, err := c.ensureGroup(ctx, req.GroupID)
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
 	state.protocolType = req.ProtocolType
 	if len(req.Protocols) > 0 {
 		state.protocolName = req.Protocols[0].Name
@@ -171,15 +182,22 @@ func (c *GroupCoordinator) JoinGroup(ctx context.Context, req *protocol.JoinGrou
 	if ready {
 		resp.ErrorCode = protocol.NONE
 	}
+	if err := c.persistGroupLocked(ctx, req.GroupID, state); err != nil {
+		resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+	}
+	c.mu.Unlock()
 	return resp, nil
 }
 
 func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGroupRequest, correlationID int32) (*protocol.SyncGroupResponse, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	state := c.groups[req.GroupID]
+	state, err := c.loadGroupIfMissing(ctx, req.GroupID)
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
 	if state == nil {
+		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -187,6 +205,7 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 		}, nil
 	}
 	if req.GenerationID != state.generationID {
+		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -194,6 +213,7 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 		}, nil
 	}
 	if _, ok := state.members[req.MemberID]; !ok {
+		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -201,6 +221,7 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 		}, nil
 	}
 	if state.state == groupStatePreparingRebalance {
+		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -210,6 +231,7 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 
 	if state.state == groupStateCompletingRebalance && len(state.assignments) == 0 {
 		if req.MemberID != state.leaderID {
+			c.mu.Unlock()
 			return &protocol.SyncGroupResponse{
 				CorrelationID: correlationID,
 				ThrottleMs:    0,
@@ -222,6 +244,7 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 
 	assignments := state.assignments[req.MemberID]
 	if assignments == nil && state.state != groupStateStable {
+		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -239,22 +262,34 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 		pn := state.protocolName
 		protocolNamePtr = &pn
 	}
-	return &protocol.SyncGroupResponse{
+	resp := &protocol.SyncGroupResponse{
 		CorrelationID: correlationID,
 		ThrottleMs:    0,
 		ErrorCode:     protocol.NONE,
 		ProtocolType:  protocolTypePtr,
 		ProtocolName:  protocolNamePtr,
 		Assignment:    encodeAssignment(assignments),
-	}, nil
+	}
+	if err := c.persistGroupLocked(ctx, req.GroupID, state); err != nil {
+		resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+	}
+	c.mu.Unlock()
+	return resp, nil
 }
 
 func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *protocol.HeartbeatRequest, correlationID int32) *protocol.HeartbeatResponse {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	state := c.groups[req.GroupID]
+	state, err := c.loadGroupIfMissing(ctx, req.GroupID)
+	if err != nil {
+		c.mu.Unlock()
+		return &protocol.HeartbeatResponse{
+			CorrelationID: correlationID,
+			ThrottleMs:    0,
+			ErrorCode:     protocol.UNKNOWN_SERVER_ERROR,
+		}
+	}
 	if state == nil {
+		c.mu.Unlock()
 		return &protocol.HeartbeatResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -263,6 +298,7 @@ func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *protocol.Heartbea
 	}
 	member := state.members[req.MemberID]
 	if member == nil {
+		c.mu.Unlock()
 		return &protocol.HeartbeatResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -270,6 +306,7 @@ func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *protocol.Heartbea
 		}
 	}
 	if req.GenerationID != state.generationID {
+		c.mu.Unlock()
 		return &protocol.HeartbeatResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -277,6 +314,7 @@ func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *protocol.Heartbea
 		}
 	}
 	if state.state != groupStateStable {
+		c.mu.Unlock()
 		return &protocol.HeartbeatResponse{
 			CorrelationID: correlationID,
 			ThrottleMs:    0,
@@ -284,25 +322,37 @@ func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *protocol.Heartbea
 		}
 	}
 	member.lastHeartbeat = time.Now()
-	return &protocol.HeartbeatResponse{
+	resp := &protocol.HeartbeatResponse{
 		CorrelationID: correlationID,
 		ThrottleMs:    0,
 		ErrorCode:     protocol.NONE,
 	}
+	if err := c.persistGroupLocked(ctx, req.GroupID, state); err != nil {
+		resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+	}
+	c.mu.Unlock()
+	return resp
 }
 
 func (c *GroupCoordinator) LeaveGroup(ctx context.Context, req *protocol.LeaveGroupRequest, correlationID int32) *protocol.LeaveGroupResponse {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	state := c.groups[req.GroupID]
+	state, err := c.loadGroupIfMissing(ctx, req.GroupID)
+	if err != nil {
+		c.mu.Unlock()
+		return &protocol.LeaveGroupResponse{
+			CorrelationID: correlationID,
+			ErrorCode:     protocol.UNKNOWN_SERVER_ERROR,
+		}
+	}
 	if state == nil {
+		c.mu.Unlock()
 		return &protocol.LeaveGroupResponse{
 			CorrelationID: correlationID,
 			ErrorCode:     protocol.UNKNOWN_MEMBER_ID,
 		}
 	}
 	if _, ok := state.members[req.MemberID]; !ok {
+		c.mu.Unlock()
 		return &protocol.LeaveGroupResponse{
 			CorrelationID: correlationID,
 			ErrorCode:     protocol.UNKNOWN_MEMBER_ID,
@@ -313,25 +363,38 @@ func (c *GroupCoordinator) LeaveGroup(ctx context.Context, req *protocol.LeaveGr
 
 	if len(state.members) == 0 {
 		delete(c.groups, req.GroupID)
-		return &protocol.LeaveGroupResponse{
+		resp := &protocol.LeaveGroupResponse{
 			CorrelationID: correlationID,
 			ErrorCode:     protocol.NONE,
 		}
+		if err := c.persistGroupLocked(ctx, req.GroupID, nil); err != nil {
+			resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+		}
+		c.mu.Unlock()
+		return resp
 	}
 	if state.leaderID == req.MemberID {
 		state.leaderID = ""
 	}
 	state.startRebalance(0)
-	return &protocol.LeaveGroupResponse{
+	resp := &protocol.LeaveGroupResponse{
 		CorrelationID: correlationID,
 		ErrorCode:     protocol.NONE,
 	}
+	if err := c.persistGroupLocked(ctx, req.GroupID, state); err != nil {
+		resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+	}
+	c.mu.Unlock()
+	return resp
 }
 
 func (c *GroupCoordinator) OffsetCommit(ctx context.Context, req *protocol.OffsetCommitRequest, correlationID int32) (*protocol.OffsetCommitResponse, error) {
 	c.mu.Lock()
-	state := c.groups[req.GroupID]
+	state, err := c.loadGroupIfMissing(ctx, req.GroupID)
 	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 
 	groupErr := int16(protocol.NONE)
 	if state == nil {
@@ -401,18 +464,151 @@ func (c *GroupCoordinator) OffsetFetch(ctx context.Context, req *protocol.Offset
 	}, nil
 }
 
-func (c *GroupCoordinator) ensureGroup(groupID string) *groupState {
-	state := c.groups[groupID]
-	if state == nil {
-		state = &groupState{
-			members:          make(map[string]*memberState),
-			assignments:      make(map[string][]assignmentTopic),
-			state:            groupStateEmpty,
-			rebalanceTimeout: defaultRebalanceTimeout,
-		}
-		c.groups[groupID] = state
+func (c *GroupCoordinator) ensureGroup(ctx context.Context, groupID string) (*groupState, error) {
+	if state, ok := c.groups[groupID]; ok {
+		return state, nil
 	}
+	state, err := c.loadGroupIfMissing(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if state != nil {
+		return state, nil
+	}
+	state = &groupState{
+		members:          make(map[string]*memberState),
+		assignments:      make(map[string][]assignmentTopic),
+		state:            groupStateEmpty,
+		rebalanceTimeout: defaultRebalanceTimeout,
+	}
+	c.groups[groupID] = state
+	return state, nil
+}
+
+func (c *GroupCoordinator) loadGroupIfMissing(ctx context.Context, groupID string) (*groupState, error) {
+	if state, ok := c.groups[groupID]; ok {
+		return state, nil
+	}
+	group, err := c.store.FetchConsumerGroup(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil {
+		return nil, nil
+	}
+	state := restoreGroupState(group)
+	c.groups[groupID] = state
+	return state, nil
+}
+
+func (c *GroupCoordinator) persistGroupLocked(ctx context.Context, groupID string, state *groupState) error {
+	if state == nil || len(state.members) == 0 {
+		return c.store.DeleteConsumerGroup(ctx, groupID)
+	}
+	group := buildConsumerGroup(groupID, state)
+	return c.store.PutConsumerGroup(ctx, group)
+}
+
+func buildConsumerGroup(groupID string, state *groupState) *metadatapb.ConsumerGroup {
+	group := &metadatapb.ConsumerGroup{
+		GroupId:      groupID,
+		State:        groupPhaseString(state.state),
+		ProtocolType: state.protocolType,
+		Protocol:     state.protocolName,
+		Leader:       state.leaderID,
+		GenerationId: state.generationID,
+		Members:      make(map[string]*metadatapb.GroupMember, len(state.members)),
+	}
+	for memberID, member := range state.members {
+		pbMember := &metadatapb.GroupMember{
+			Subscriptions: append([]string(nil), member.topics...),
+		}
+		if !member.lastHeartbeat.IsZero() {
+			pbMember.HeartbeatAt = member.lastHeartbeat.UTC().Format(time.RFC3339Nano)
+		}
+		if assignments := state.assignments[memberID]; len(assignments) > 0 {
+			pbMember.Assignments = make([]*metadatapb.Assignment, 0, len(assignments))
+			for _, assignment := range assignments {
+				pbMember.Assignments = append(pbMember.Assignments, &metadatapb.Assignment{
+					Topic:      assignment.Name,
+					Partitions: append([]int32(nil), assignment.Partitions...),
+				})
+			}
+		}
+		group.Members[memberID] = pbMember
+	}
+	return group
+}
+
+func restoreGroupState(group *metadatapb.ConsumerGroup) *groupState {
+	state := &groupState{
+		protocolName:     group.Protocol,
+		protocolType:     group.ProtocolType,
+		generationID:     group.GenerationId,
+		leaderID:         group.Leader,
+		state:            parseGroupPhase(group.State),
+		members:          make(map[string]*memberState, len(group.Members)),
+		assignments:      make(map[string][]assignmentTopic),
+		rebalanceTimeout: defaultRebalanceTimeout,
+	}
+	for memberID, member := range group.Members {
+		entry := &memberState{
+			topics:         append([]string(nil), member.Subscriptions...),
+			sessionTimeout: defaultSessionTimeout,
+			joinGeneration: group.GenerationId,
+		}
+		if member.HeartbeatAt != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, member.HeartbeatAt); err == nil {
+				entry.lastHeartbeat = parsed
+			}
+		}
+		state.members[memberID] = entry
+		if len(member.Assignments) > 0 {
+			memberAssignments := make([]assignmentTopic, 0, len(member.Assignments))
+			for _, assignment := range member.Assignments {
+				memberAssignments = append(memberAssignments, assignmentTopic{
+					Name:       assignment.Topic,
+					Partitions: append([]int32(nil), assignment.Partitions...),
+				})
+			}
+			state.assignments[memberID] = memberAssignments
+		}
+	}
+	if state.state == groupStatePreparingRebalance || state.state == groupStateCompletingRebalance {
+		state.rebalanceDeadline = time.Now().Add(state.rebalanceTimeout)
+	}
+	state.ensureLeader()
 	return state
+}
+
+func groupPhaseString(state groupPhase) string {
+	switch state {
+	case groupStatePreparingRebalance:
+		return groupStatePreparingStr
+	case groupStateCompletingRebalance:
+		return groupStateCompletingStr
+	case groupStateStable:
+		return groupStateStableStr
+	case groupStateDead:
+		return groupStateDeadStr
+	default:
+		return groupStateEmptyStr
+	}
+}
+
+func parseGroupPhase(state string) groupPhase {
+	switch state {
+	case groupStatePreparingStr:
+		return groupStatePreparingRebalance
+	case groupStateCompletingStr:
+		return groupStateCompletingRebalance
+	case groupStateStableStr:
+		return groupStateStable
+	case groupStateDeadStr:
+		return groupStateDead
+	default:
+		return groupStateEmpty
+	}
 }
 
 func (c *GroupCoordinator) newMemberID(group string) string {
@@ -638,16 +834,19 @@ func (c *GroupCoordinator) cleanupGroups() {
 	defer c.mu.Unlock()
 
 	now := time.Now()
+	ctx := context.Background()
 	for groupID, state := range c.groups {
 		removed := state.removeExpiredMembers(now)
 		lostDuringRebalance := state.dropRebalanceLaggers(now)
 
 		if len(state.members) == 0 {
 			delete(c.groups, groupID)
+			_ = c.persistGroupLocked(ctx, groupID, nil)
 			continue
 		}
 		if removed || lostDuringRebalance {
 			state.startRebalance(0)
+			_ = c.persistGroupLocked(ctx, groupID, state)
 		}
 	}
 }

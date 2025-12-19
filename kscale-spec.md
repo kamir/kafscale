@@ -2822,7 +2822,7 @@ ENTRYPOINT ["./broker"]
 - [x] Rebuild partition logs on broker restart by listing S3 segments + loading indexes
 - [x] Align fetch request support with v13 (spec)
 - [x] Align S3 key layout with namespace support and use index-based range reads
-- [ ] Persist consumer group metadata (not just offsets) in etcd or document in-memory limitations
+- [x] Persist consumer group metadata (not just offsets) in etcd or document in-memory limitations
 - [x] Define etcd HA requirements (dedicated cluster, SSD storage, odd quorum) and reflect in ops docs
 - [x] Honor `KAFSCALE_OPERATOR_ETCD_ENDPOINTS` when cluster spec omits endpoints
 - [x] Auto-provision a 3-node etcd StatefulSet when no endpoints are configured

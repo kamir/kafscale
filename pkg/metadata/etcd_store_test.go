@@ -11,6 +11,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
 )
 
@@ -103,6 +104,54 @@ func TestEtcdStoreDeleteTopicRemovesOffsets(t *testing.T) {
 		if string(kv.Key) == "/kafscale/consumers/group-a/offsets/orders/0" {
 			t.Fatalf("consumer offset still present after delete")
 		}
+	}
+}
+
+func TestEtcdStoreConsumerGroupPersistence(t *testing.T) {
+	e, endpoints := startEmbeddedEtcd(t)
+	defer e.Close()
+
+	ctx := context.Background()
+	store, err := NewEtcdStore(ctx, ClusterMetadata{}, EtcdStoreConfig{Endpoints: endpoints})
+	if err != nil {
+		t.Fatalf("NewEtcdStore: %v", err)
+	}
+
+	group := &metadatapb.ConsumerGroup{
+		GroupId:      "group-1",
+		State:        "stable",
+		ProtocolType: "consumer",
+		Protocol:     "range",
+		Leader:       "member-1",
+		GenerationId: 3,
+		Members: map[string]*metadatapb.GroupMember{
+			"member-1": {
+				Subscriptions: []string{"orders"},
+				Assignments: []*metadatapb.Assignment{
+					{Topic: "orders", Partitions: []int32{0, 1}},
+				},
+			},
+		},
+	}
+	if err := store.PutConsumerGroup(ctx, group); err != nil {
+		t.Fatalf("PutConsumerGroup: %v", err)
+	}
+	loaded, err := store.FetchConsumerGroup(ctx, "group-1")
+	if err != nil {
+		t.Fatalf("FetchConsumerGroup: %v", err)
+	}
+	if loaded == nil || loaded.GenerationId != 3 || loaded.Leader != "member-1" {
+		t.Fatalf("unexpected group data: %#v", loaded)
+	}
+	if err := store.DeleteConsumerGroup(ctx, "group-1"); err != nil {
+		t.Fatalf("DeleteConsumerGroup: %v", err)
+	}
+	loaded, err = store.FetchConsumerGroup(ctx, "group-1")
+	if err != nil {
+		t.Fatalf("FetchConsumerGroup after delete: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("expected group deleted, got %#v", loaded)
 	}
 }
 
