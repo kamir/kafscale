@@ -99,6 +99,7 @@ make test-consumer-group
 - `docs/quickstart.md` - install the operator and create your first cluster
 - `docs/architecture.md` - component responsibilities and data flow
 - `docs/protocol.md` - Kafka protocol support matrix
+- `docs/security.md` - security posture and roadmap
 - `docs/roadmap.md` - completed work and open gaps
 - `docs/user-guide.md` - running the platform
 - `docs/development.md` - dev workflow and test targets

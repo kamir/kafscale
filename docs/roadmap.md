@@ -33,6 +33,7 @@ This roadmap tracks completed work and open gaps. It is intentionally high level
 - Kubernetes operator with managed etcd + snapshot backups
 - End-to-end tests for broker durability and operator resilience
 - Admin ops API e2e coverage
+- Security review (TLS/auth)
 
 ## Open
 

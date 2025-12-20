@@ -43,4 +43,5 @@ Kafscale trades latency for operational simplicity. Brokers are stateless. S3 is
 - `docs/quickstart.md` for installation.
 - `docs/architecture.md` for system internals.
 - `docs/protocol.md` for Kafka protocol coverage.
+- `docs/security.md` for security posture and roadmap.
 - `kafscale-spec.md` for the technical specification.
