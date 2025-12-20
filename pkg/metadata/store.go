@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
@@ -43,8 +44,16 @@ type Store interface {
 	PutConsumerGroup(ctx context.Context, group *metadatapb.ConsumerGroup) error
 	// FetchConsumerGroup retrieves consumer group metadata.
 	FetchConsumerGroup(ctx context.Context, groupID string) (*metadatapb.ConsumerGroup, error)
+	// ListConsumerGroups returns all stored consumer group metadata.
+	ListConsumerGroups(ctx context.Context) ([]*metadatapb.ConsumerGroup, error)
 	// DeleteConsumerGroup removes consumer group metadata.
 	DeleteConsumerGroup(ctx context.Context, groupID string) error
+	// FetchTopicConfig returns the stored topic configuration.
+	FetchTopicConfig(ctx context.Context, topic string) (*metadatapb.TopicConfig, error)
+	// UpdateTopicConfig persists topic configuration updates.
+	UpdateTopicConfig(ctx context.Context, cfg *metadatapb.TopicConfig) error
+	// CreatePartitions expands a topic's partition count.
+	CreatePartitions(ctx context.Context, topic string, partitionCount int32) error
 	// CreateTopic creates a new topic with the provided specification.
 	CreateTopic(ctx context.Context, spec TopicSpec) (*protocol.MetadataTopic, error)
 	// DeleteTopic removes a topic and associated offsets.
@@ -83,6 +92,7 @@ type InMemoryStore struct {
 	consumerOffsets map[string]int64
 	consumerMeta    map[string]string
 	consumerGroups  map[string]*metadatapb.ConsumerGroup
+	topicConfigs    map[string]*metadatapb.TopicConfig
 }
 
 // NewInMemoryStore builds an in-memory metadata store with the provided state.
@@ -93,6 +103,7 @@ func NewInMemoryStore(state ClusterMetadata) *InMemoryStore {
 		consumerOffsets: make(map[string]int64),
 		consumerMeta:    make(map[string]string),
 		consumerGroups:  make(map[string]*metadatapb.ConsumerGroup),
+		topicConfigs:    make(map[string]*metadatapb.TopicConfig),
 	}
 }
 
@@ -298,6 +309,7 @@ func (s *InMemoryStore) CreateTopic(ctx context.Context, spec TopicSpec) (*proto
 		Partitions: partitions,
 	}
 	s.state.Topics = append(s.state.Topics, newTopic)
+	s.topicConfigs[spec.Name] = defaultTopicConfigFromTopic(&newTopic, spec.ReplicationFactor)
 	return &newTopic, nil
 }
 
@@ -321,6 +333,100 @@ func (s *InMemoryStore) defaultLeaderID() int32 {
 		return s.state.ControllerID
 	}
 	return s.state.Brokers[0].NodeID
+}
+
+// FetchTopicConfig implements Store.FetchTopicConfig.
+func (s *InMemoryStore) FetchTopicConfig(ctx context.Context, topic string) (*metadatapb.TopicConfig, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, entry := range s.state.Topics {
+		if entry.Name != topic {
+			continue
+		}
+		if cfg, ok := s.topicConfigs[topic]; ok {
+			return cloneTopicConfig(cfg), nil
+		}
+		return defaultTopicConfigFromTopic(&entry, int16(len(entry.Partitions))), nil
+	}
+	return nil, ErrUnknownTopic
+}
+
+// UpdateTopicConfig implements Store.UpdateTopicConfig.
+func (s *InMemoryStore) UpdateTopicConfig(ctx context.Context, cfg *metadatapb.TopicConfig) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if cfg == nil || cfg.Name == "" {
+		return ErrInvalidTopic
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var topic *protocol.MetadataTopic
+	for i := range s.state.Topics {
+		if s.state.Topics[i].Name == cfg.Name {
+			topic = &s.state.Topics[i]
+			break
+		}
+	}
+	if topic == nil {
+		return ErrUnknownTopic
+	}
+	if cfg.Partitions == 0 {
+		cfg.Partitions = int32(len(topic.Partitions))
+	}
+	s.topicConfigs[cfg.Name] = cloneTopicConfig(cfg)
+	return nil
+}
+
+// CreatePartitions implements Store.CreatePartitions.
+func (s *InMemoryStore) CreatePartitions(ctx context.Context, topic string, partitionCount int32) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if topic == "" || partitionCount <= 0 {
+		return ErrInvalidTopic
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var target *protocol.MetadataTopic
+	for i := range s.state.Topics {
+		if s.state.Topics[i].Name == topic {
+			target = &s.state.Topics[i]
+			break
+		}
+	}
+	if target == nil {
+		return ErrUnknownTopic
+	}
+	current := int32(len(target.Partitions))
+	if partitionCount <= current {
+		return ErrInvalidTopic
+	}
+	leaderID := s.defaultLeaderID()
+	for i := current; i < partitionCount; i++ {
+		target.Partitions = append(target.Partitions, protocol.MetadataPartition{
+			PartitionIndex: i,
+			LeaderID:       leaderID,
+			ReplicaNodes:   []int32{leaderID},
+			ISRNodes:       []int32{leaderID},
+		})
+	}
+	cfg, ok := s.topicConfigs[topic]
+	if !ok {
+		cfg = defaultTopicConfigFromTopic(target, int16(len(target.Partitions)))
+	}
+	cfg.Partitions = partitionCount
+	s.topicConfigs[topic] = cloneTopicConfig(cfg)
+	return nil
 }
 
 // DeleteTopic implements Store.DeleteTopic.
@@ -410,6 +516,22 @@ func (s *InMemoryStore) FetchConsumerGroup(ctx context.Context, groupID string) 
 	return nil, nil
 }
 
+// ListConsumerGroups implements Store.ListConsumerGroups.
+func (s *InMemoryStore) ListConsumerGroups(ctx context.Context) ([]*metadatapb.ConsumerGroup, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	groups := make([]*metadatapb.ConsumerGroup, 0, len(s.consumerGroups))
+	for _, group := range s.consumerGroups {
+		groups = append(groups, cloneConsumerGroup(group))
+	}
+	return groups, nil
+}
+
 // DeleteConsumerGroup implements Store.DeleteConsumerGroup.
 func (s *InMemoryStore) DeleteConsumerGroup(ctx context.Context, groupID string) error {
 	select {
@@ -453,6 +575,45 @@ func cloneConsumerGroup(group *metadatapb.ConsumerGroup) *metadatapb.ConsumerGro
 			}
 		}
 		out.Members[memberID] = cloned
+	}
+	return out
+}
+
+func defaultTopicConfigFromTopic(topic *protocol.MetadataTopic, replicationFactor int16) *metadatapb.TopicConfig {
+	if topic == nil {
+		return &metadatapb.TopicConfig{}
+	}
+	if replicationFactor <= 0 && len(topic.Partitions) > 0 {
+		replicationFactor = int16(len(topic.Partitions[0].ReplicaNodes))
+	}
+	return &metadatapb.TopicConfig{
+		Name:              topic.Name,
+		Partitions:        int32(len(topic.Partitions)),
+		ReplicationFactor: int32(replicationFactor),
+		RetentionMs:       -1,
+		RetentionBytes:    -1,
+		SegmentBytes:      0,
+		CreatedAt:         time.Now().UTC().Format(time.RFC3339),
+		Config:            make(map[string]string),
+	}
+}
+
+func cloneTopicConfig(cfg *metadatapb.TopicConfig) *metadatapb.TopicConfig {
+	if cfg == nil {
+		return nil
+	}
+	out := &metadatapb.TopicConfig{
+		Name:              cfg.Name,
+		Partitions:        cfg.Partitions,
+		ReplicationFactor: cfg.ReplicationFactor,
+		RetentionMs:       cfg.RetentionMs,
+		RetentionBytes:    cfg.RetentionBytes,
+		SegmentBytes:      cfg.SegmentBytes,
+		CreatedAt:         cfg.CreatedAt,
+		Config:            make(map[string]string, len(cfg.Config)),
+	}
+	for key, val := range cfg.Config {
+		out.Config[key] = val
 	}
 	return out
 }

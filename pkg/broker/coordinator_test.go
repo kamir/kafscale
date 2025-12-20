@@ -16,8 +16,13 @@
 package broker
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
+	"github.com/novatechflow/kafscale/pkg/metadata"
+	"github.com/novatechflow/kafscale/pkg/protocol"
 )
 
 func TestConsumerGroupTimeoutPersistence(t *testing.T) {
@@ -61,5 +66,75 @@ func TestConsumerGroupTimeoutPersistence(t *testing.T) {
 	}
 	if restoredMember.sessionTimeout != 20*time.Second {
 		t.Fatalf("expected session timeout 20s got %s", restoredMember.sessionTimeout)
+	}
+}
+
+func TestCoordinatorListDescribeGroups(t *testing.T) {
+	store := metadata.NewInMemoryStore(metadata.ClusterMetadata{})
+	group := &metadatapb.ConsumerGroup{
+		GroupId:      "group-1",
+		State:        "stable",
+		ProtocolType: "consumer",
+		Protocol:     "range",
+		Members: map[string]*metadatapb.GroupMember{
+			"member-1": {ClientId: "client-1", ClientHost: "127.0.0.1"},
+		},
+	}
+	if err := store.PutConsumerGroup(context.Background(), group); err != nil {
+		t.Fatalf("PutConsumerGroup: %v", err)
+	}
+	coord := NewGroupCoordinator(store, protocol.MetadataBroker{NodeID: 1, Host: "127.0.0.1", Port: 9092}, nil)
+
+	listResp, err := coord.ListGroups(context.Background(), &protocol.ListGroupsRequest{
+		StatesFilter: []string{"Stable"},
+		TypesFilter:  []string{"classic"},
+	}, 1)
+	if err != nil {
+		t.Fatalf("ListGroups: %v", err)
+	}
+	if len(listResp.Groups) != 1 || listResp.Groups[0].GroupID != "group-1" {
+		t.Fatalf("unexpected list response: %#v", listResp.Groups)
+	}
+
+	describeResp, err := coord.DescribeGroups(context.Background(), &protocol.DescribeGroupsRequest{
+		Groups: []string{"group-1"},
+	}, 2)
+	if err != nil {
+		t.Fatalf("DescribeGroups: %v", err)
+	}
+	if len(describeResp.Groups) != 1 || describeResp.Groups[0].State != "Stable" {
+		t.Fatalf("unexpected describe response: %#v", describeResp.Groups)
+	}
+}
+
+func TestCoordinatorDeleteGroups(t *testing.T) {
+	store := metadata.NewInMemoryStore(metadata.ClusterMetadata{})
+	group := &metadatapb.ConsumerGroup{GroupId: "group-1", State: "stable"}
+	if err := store.PutConsumerGroup(context.Background(), group); err != nil {
+		t.Fatalf("PutConsumerGroup: %v", err)
+	}
+	coord := NewGroupCoordinator(store, protocol.MetadataBroker{NodeID: 1, Host: "127.0.0.1", Port: 9092}, nil)
+
+	resp, err := coord.DeleteGroups(context.Background(), &protocol.DeleteGroupsRequest{
+		Groups: []string{"group-1", "missing"},
+	}, 3)
+	if err != nil {
+		t.Fatalf("DeleteGroups: %v", err)
+	}
+	if len(resp.Groups) != 2 {
+		t.Fatalf("unexpected delete response: %#v", resp.Groups)
+	}
+	if resp.Groups[0].ErrorCode != protocol.NONE {
+		t.Fatalf("expected delete success: %#v", resp.Groups[0])
+	}
+	if resp.Groups[1].ErrorCode != protocol.GROUP_ID_NOT_FOUND {
+		t.Fatalf("expected group not found: %#v", resp.Groups[1])
+	}
+	remaining, err := store.FetchConsumerGroup(context.Background(), "group-1")
+	if err != nil {
+		t.Fatalf("FetchConsumerGroup: %v", err)
+	}
+	if remaining != nil {
+		t.Fatalf("expected group deleted, found: %#v", remaining)
 	}
 }

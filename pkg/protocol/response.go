@@ -240,6 +240,131 @@ type OffsetFetchResponse struct {
 	ErrorCode     int16
 }
 
+type OffsetForLeaderEpochPartitionResponse struct {
+	Partition   int32
+	ErrorCode   int16
+	LeaderEpoch int32
+	EndOffset   int64
+}
+
+type OffsetForLeaderEpochTopicResponse struct {
+	Name       string
+	Partitions []OffsetForLeaderEpochPartitionResponse
+}
+
+type OffsetForLeaderEpochResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	Topics        []OffsetForLeaderEpochTopicResponse
+}
+
+type DescribeGroupsResponseGroupMember struct {
+	MemberID         string
+	InstanceID       *string
+	ClientID         string
+	ClientHost       string
+	ProtocolMetadata []byte
+	MemberAssignment []byte
+}
+
+type DescribeGroupsResponseGroup struct {
+	ErrorCode            int16
+	GroupID              string
+	State                string
+	ProtocolType         string
+	Protocol             string
+	Members              []DescribeGroupsResponseGroupMember
+	AuthorizedOperations int32
+}
+
+type DescribeGroupsResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	Groups        []DescribeGroupsResponseGroup
+}
+
+type ListGroupsResponseGroup struct {
+	GroupID      string
+	ProtocolType string
+	GroupState   string
+	GroupType    string
+}
+
+type ListGroupsResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	ErrorCode     int16
+	Groups        []ListGroupsResponseGroup
+}
+
+type DescribeConfigsResponseConfigSynonym struct {
+	Name   string
+	Value  *string
+	Source int8
+}
+
+type DescribeConfigsResponseConfig struct {
+	Name          string
+	Value         *string
+	ReadOnly      bool
+	IsDefault     bool
+	Source        int8
+	IsSensitive   bool
+	Synonyms      []DescribeConfigsResponseConfigSynonym
+	ConfigType    int8
+	Documentation *string
+}
+
+type DescribeConfigsResponseResource struct {
+	ErrorCode    int16
+	ErrorMessage *string
+	ResourceType int8
+	ResourceName string
+	Configs      []DescribeConfigsResponseConfig
+}
+
+type DescribeConfigsResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	Resources     []DescribeConfigsResponseResource
+}
+
+type AlterConfigsResponseResource struct {
+	ErrorCode    int16
+	ErrorMessage *string
+	ResourceType int8
+	ResourceName string
+}
+
+type AlterConfigsResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	Resources     []AlterConfigsResponseResource
+}
+
+type CreatePartitionsResponseTopic struct {
+	Name         string
+	ErrorCode    int16
+	ErrorMessage *string
+}
+
+type CreatePartitionsResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	Topics        []CreatePartitionsResponseTopic
+}
+
+type DeleteGroupsResponseGroup struct {
+	Group     string
+	ErrorCode int16
+}
+
+type DeleteGroupsResponse struct {
+	CorrelationID int32
+	ThrottleMs    int32
+	Groups        []DeleteGroupsResponseGroup
+}
+
 // EncodeApiVersionsResponse renders bytes ready to send on the wire.
 func EncodeApiVersionsResponse(resp *ApiVersionsResponse) ([]byte, error) {
 	w := newByteWriter(64)
@@ -752,6 +877,313 @@ func EncodeOffsetFetchResponse(resp *OffsetFetchResponse, version int16) ([]byte
 	}
 	if version >= 2 {
 		w.Int16(resp.ErrorCode)
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeOffsetForLeaderEpochResponse renders bytes for offset for leader epoch responses.
+func EncodeOffsetForLeaderEpochResponse(resp *OffsetForLeaderEpochResponse, version int16) ([]byte, error) {
+	if version != 3 {
+		return nil, fmt.Errorf("offset for leader epoch response version %d not supported", version)
+	}
+	w := newByteWriter(256)
+	w.Int32(resp.CorrelationID)
+	if version >= 2 {
+		w.Int32(resp.ThrottleMs)
+	}
+	w.Int32(int32(len(resp.Topics)))
+	for _, topic := range resp.Topics {
+		w.String(topic.Name)
+		w.Int32(int32(len(topic.Partitions)))
+		for _, part := range topic.Partitions {
+			w.Int32(part.Partition)
+			w.Int16(part.ErrorCode)
+			w.Int32(part.LeaderEpoch)
+			w.Int64(part.EndOffset)
+		}
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeDescribeGroupsResponse renders bytes for describe groups responses.
+func EncodeDescribeGroupsResponse(resp *DescribeGroupsResponse, version int16) ([]byte, error) {
+	if version != 5 {
+		return nil, fmt.Errorf("describe groups response version %d not supported", version)
+	}
+	flexible := version >= 5
+	w := newByteWriter(256)
+	w.Int32(resp.CorrelationID)
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	if version >= 1 {
+		w.Int32(resp.ThrottleMs)
+	}
+	if flexible {
+		w.CompactArrayLen(len(resp.Groups))
+	} else {
+		w.Int32(int32(len(resp.Groups)))
+	}
+	for _, group := range resp.Groups {
+		w.Int16(group.ErrorCode)
+		if flexible {
+			w.CompactString(group.GroupID)
+			w.CompactString(group.State)
+			w.CompactString(group.ProtocolType)
+			w.CompactString(group.Protocol)
+		} else {
+			w.String(group.GroupID)
+			w.String(group.State)
+			w.String(group.ProtocolType)
+			w.String(group.Protocol)
+		}
+		if flexible {
+			w.CompactArrayLen(len(group.Members))
+		} else {
+			w.Int32(int32(len(group.Members)))
+		}
+		for _, member := range group.Members {
+			if flexible {
+				w.CompactString(member.MemberID)
+				w.CompactNullableString(member.InstanceID)
+				w.CompactString(member.ClientID)
+				w.CompactString(member.ClientHost)
+				w.CompactBytes(member.ProtocolMetadata)
+				w.CompactBytes(member.MemberAssignment)
+				w.WriteTaggedFields(0)
+			} else {
+				w.String(member.MemberID)
+				w.NullableString(member.InstanceID)
+				w.String(member.ClientID)
+				w.String(member.ClientHost)
+				w.BytesWithLength(member.ProtocolMetadata)
+				w.BytesWithLength(member.MemberAssignment)
+			}
+		}
+		if version >= 3 {
+			w.Int32(group.AuthorizedOperations)
+		}
+		if flexible {
+			w.WriteTaggedFields(0)
+		}
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeListGroupsResponse renders bytes for list groups responses.
+func EncodeListGroupsResponse(resp *ListGroupsResponse, version int16) ([]byte, error) {
+	if version != 5 {
+		return nil, fmt.Errorf("list groups response version %d not supported", version)
+	}
+	flexible := version >= 3
+	w := newByteWriter(256)
+	w.Int32(resp.CorrelationID)
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	if version >= 1 {
+		w.Int32(resp.ThrottleMs)
+	}
+	w.Int16(resp.ErrorCode)
+	if flexible {
+		w.CompactArrayLen(len(resp.Groups))
+	} else {
+		w.Int32(int32(len(resp.Groups)))
+	}
+	for _, group := range resp.Groups {
+		if flexible {
+			w.CompactString(group.GroupID)
+			w.CompactString(group.ProtocolType)
+			w.CompactString(group.GroupState)
+			w.CompactString(group.GroupType)
+			w.WriteTaggedFields(0)
+		} else {
+			w.String(group.GroupID)
+			w.String(group.ProtocolType)
+			if version >= 4 {
+				w.String(group.GroupState)
+			}
+			if version >= 5 {
+				w.String(group.GroupType)
+			}
+		}
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeDescribeConfigsResponse renders bytes for describe configs responses.
+func EncodeDescribeConfigsResponse(resp *DescribeConfigsResponse, version int16) ([]byte, error) {
+	if version != 4 {
+		return nil, fmt.Errorf("describe configs response version %d not supported", version)
+	}
+	flexible := version >= 4
+	w := newByteWriter(256)
+	w.Int32(resp.CorrelationID)
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	w.Int32(resp.ThrottleMs)
+	if flexible {
+		w.CompactArrayLen(len(resp.Resources))
+	} else {
+		w.Int32(int32(len(resp.Resources)))
+	}
+	for _, resource := range resp.Resources {
+		w.Int16(resource.ErrorCode)
+		if flexible {
+			w.CompactNullableString(resource.ErrorMessage)
+		} else {
+			w.NullableString(resource.ErrorMessage)
+		}
+		w.Int8(resource.ResourceType)
+		if flexible {
+			w.CompactString(resource.ResourceName)
+		} else {
+			w.String(resource.ResourceName)
+		}
+		if flexible {
+			w.CompactArrayLen(len(resource.Configs))
+		} else {
+			w.Int32(int32(len(resource.Configs)))
+		}
+		for _, cfg := range resource.Configs {
+			if flexible {
+				w.CompactString(cfg.Name)
+				w.CompactNullableString(cfg.Value)
+			} else {
+				w.String(cfg.Name)
+				w.NullableString(cfg.Value)
+			}
+			w.Bool(cfg.ReadOnly)
+			w.Int8(cfg.Source)
+			w.Bool(cfg.IsSensitive)
+			if flexible {
+				w.CompactArrayLen(len(cfg.Synonyms))
+			} else {
+				w.Int32(int32(len(cfg.Synonyms)))
+			}
+			for _, synonym := range cfg.Synonyms {
+				if flexible {
+					w.CompactString(synonym.Name)
+					w.CompactNullableString(synonym.Value)
+				} else {
+					w.String(synonym.Name)
+					w.NullableString(synonym.Value)
+				}
+				w.Int8(synonym.Source)
+				if flexible {
+					w.WriteTaggedFields(0)
+				}
+			}
+			w.Int8(cfg.ConfigType)
+			if flexible {
+				w.CompactNullableString(cfg.Documentation)
+				w.WriteTaggedFields(0)
+			} else {
+				w.NullableString(cfg.Documentation)
+			}
+		}
+		if flexible {
+			w.WriteTaggedFields(0)
+		}
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeAlterConfigsResponse renders bytes for alter configs responses.
+func EncodeAlterConfigsResponse(resp *AlterConfigsResponse, version int16) ([]byte, error) {
+	if version != 1 {
+		return nil, fmt.Errorf("alter configs response version %d not supported", version)
+	}
+	w := newByteWriter(256)
+	w.Int32(resp.CorrelationID)
+	w.Int32(resp.ThrottleMs)
+	w.Int32(int32(len(resp.Resources)))
+	for _, resource := range resp.Resources {
+		w.Int16(resource.ErrorCode)
+		w.NullableString(resource.ErrorMessage)
+		w.Int8(resource.ResourceType)
+		w.String(resource.ResourceName)
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeCreatePartitionsResponse renders bytes for create partitions responses.
+func EncodeCreatePartitionsResponse(resp *CreatePartitionsResponse, version int16) ([]byte, error) {
+	if version < 0 || version > 3 {
+		return nil, fmt.Errorf("create partitions response version %d not supported", version)
+	}
+	flexible := version >= 2
+	w := newByteWriter(128)
+	w.Int32(resp.CorrelationID)
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	w.Int32(resp.ThrottleMs)
+	if flexible {
+		w.CompactArrayLen(len(resp.Topics))
+	} else {
+		w.Int32(int32(len(resp.Topics)))
+	}
+	for _, topic := range resp.Topics {
+		if flexible {
+			w.CompactString(topic.Name)
+		} else {
+			w.String(topic.Name)
+		}
+		w.Int16(topic.ErrorCode)
+		if flexible {
+			w.CompactNullableString(topic.ErrorMessage)
+			w.WriteTaggedFields(0)
+		} else {
+			w.NullableString(topic.ErrorMessage)
+		}
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	return w.Bytes(), nil
+}
+
+// EncodeDeleteGroupsResponse renders bytes for delete groups responses.
+func EncodeDeleteGroupsResponse(resp *DeleteGroupsResponse, version int16) ([]byte, error) {
+	if version < 0 || version > 2 {
+		return nil, fmt.Errorf("delete groups response version %d not supported", version)
+	}
+	flexible := version >= 2
+	w := newByteWriter(128)
+	w.Int32(resp.CorrelationID)
+	if flexible {
+		w.WriteTaggedFields(0)
+	}
+	w.Int32(resp.ThrottleMs)
+	if flexible {
+		w.CompactArrayLen(len(resp.Groups))
+	} else {
+		w.Int32(int32(len(resp.Groups)))
+	}
+	for _, group := range resp.Groups {
+		if flexible {
+			w.CompactString(group.Group)
+		} else {
+			w.String(group.Group)
+		}
+		w.Int16(group.ErrorCode)
+		if flexible {
+			w.WriteTaggedFields(0)
+		}
+	}
+	if flexible {
+		w.WriteTaggedFields(0)
 	}
 	return w.Bytes(), nil
 }

@@ -75,6 +75,32 @@ helm upgrade --install kafscale deploy/helm/kafscale \
 - **Startup gating** – Broker pods exit immediately if they cannot read metadata or write a probe object to S3 during startup, so Kubernetes restarts them rather than leaving a stuck listener in place.
 - **Leader IDs** – Each broker advertises a numeric `NodeID` in etcd. In the single-node demo you’ll always see `Leader=0` in the Console’s topic detail because the only broker has ID `0`. In real clusters those IDs align with the broker addresses the operator published; if you see `Leader=3`, look for the broker with `NodeID 3` in the metadata payload.
 
+## Ops API Examples
+
+Kafscale exposes Kafka admin APIs for operator workflows (consumer group visibility,
+config inspection, cleanup). The canonical plan and scope live in `docs/ops-api.md`.
+
+```bash
+# List consumer groups
+kafka-consumer-groups.sh --bootstrap-server <broker> --list
+
+# Describe a consumer group
+kafka-consumer-groups.sh --bootstrap-server <broker> --describe --group <group-id>
+
+# Delete a consumer group
+kafka-consumer-groups.sh --bootstrap-server <broker> --delete --group <group-id>
+
+# Read topic configs
+kafka-configs.sh --bootstrap-server <broker> --describe --entity-type topics --entity-name <topic>
+
+# Increase partition count for a topic (additive only)
+kafka-topics.sh --bootstrap-server <broker> --alter --topic <topic> --partitions <count>
+
+# Update topic retention (whitelist only)
+kafka-configs.sh --bootstrap-server <broker> --alter --entity-type topics --entity-name <topic> \
+  --add-config retention.ms=604800000
+```
+
 ## etcd Availability & Storage
 
 Kafscale depends on etcd for metadata + offsets. Treat etcd as a production datastore:

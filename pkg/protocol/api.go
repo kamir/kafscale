@@ -17,22 +17,27 @@ package protocol
 
 // API keys supported by Kafscale in milestone 1.
 const (
-	APIKeyProduce         int16 = 0
-	APIKeyFetch           int16 = 1
-	APIKeyMetadata        int16 = 3
-	APIKeyOffsetCommit    int16 = 8
-	APIKeyOffsetFetch     int16 = 9
-	APIKeyFindCoordinator int16 = 10
-	APIKeyJoinGroup       int16 = 11
-	APIKeyHeartbeat       int16 = 12
-	APIKeyLeaveGroup      int16 = 13
-	APIKeySyncGroup       int16 = 14
-	APIKeyApiVersion      int16 = 18
-	APIKeyCreateTopics    int16 = 19
-	APIKeyDeleteTopics    int16 = 20
-	APIKeyListOffsets     int16 = 2
-	APIKeyDescribeConfigs int16 = 32
-	APIKeyDeleteGroups    int16 = 42
+	APIKeyProduce              int16 = 0
+	APIKeyFetch                int16 = 1
+	APIKeyMetadata             int16 = 3
+	APIKeyOffsetCommit         int16 = 8
+	APIKeyOffsetFetch          int16 = 9
+	APIKeyFindCoordinator      int16 = 10
+	APIKeyJoinGroup            int16 = 11
+	APIKeyHeartbeat            int16 = 12
+	APIKeyLeaveGroup           int16 = 13
+	APIKeySyncGroup            int16 = 14
+	APIKeyDescribeGroups       int16 = 15
+	APIKeyListGroups           int16 = 16
+	APIKeyApiVersion           int16 = 18
+	APIKeyCreateTopics         int16 = 19
+	APIKeyDeleteTopics         int16 = 20
+	APIKeyOffsetForLeaderEpoch int16 = 23
+	APIKeyListOffsets          int16 = 2
+	APIKeyDescribeConfigs      int16 = 32
+	APIKeyAlterConfigs         int16 = 33
+	APIKeyCreatePartitions     int16 = 37
+	APIKeyDeleteGroups         int16 = 42
 )
 
 // ApiVersion describes the supported version range for an API.

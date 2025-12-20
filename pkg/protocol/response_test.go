@@ -703,6 +703,256 @@ func TestEncodeFindCoordinatorResponseFlexible(t *testing.T) {
 	}
 }
 
+func TestEncodeDescribeGroupsResponseV5KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeDescribeGroupsResponse(&DescribeGroupsResponse{
+		CorrelationID: 55,
+		ThrottleMs:    0,
+		Groups: []DescribeGroupsResponseGroup{
+			{
+				ErrorCode:            NONE,
+				GroupID:              "group-1",
+				State:                "Stable",
+				ProtocolType:         "consumer",
+				Protocol:             "range",
+				AuthorizedOperations: 0,
+				Members: []DescribeGroupsResponseGroupMember{
+					{
+						MemberID:         "member-1",
+						ClientID:         "client-1",
+						ClientHost:       "127.0.0.1",
+						ProtocolMetadata: []byte{0x01},
+						MemberAssignment: []byte{0x02},
+					},
+				},
+			},
+		},
+	}, 5)
+	if err != nil {
+		t.Fatalf("EncodeDescribeGroupsResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 55 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if err := reader.SkipTaggedFields(); err != nil {
+		t.Fatalf("skip response header tags: %v", err)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrDescribeGroupsResponse()
+	kmsgResp.Version = 5
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Groups) != 1 {
+		t.Fatalf("unexpected groups: %+v", kmsgResp.Groups)
+	}
+	group := kmsgResp.Groups[0]
+	if group.Group != "group-1" || group.State != "Stable" {
+		t.Fatalf("unexpected group data: %+v", group)
+	}
+	if len(group.Members) != 1 || group.Members[0].MemberID != "member-1" {
+		t.Fatalf("unexpected member data: %+v", group.Members)
+	}
+}
+
+func TestEncodeListGroupsResponseV5KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeListGroupsResponse(&ListGroupsResponse{
+		CorrelationID: 77,
+		ThrottleMs:    0,
+		ErrorCode:     NONE,
+		Groups: []ListGroupsResponseGroup{
+			{
+				GroupID:      "group-1",
+				ProtocolType: "consumer",
+				GroupState:   "Stable",
+				GroupType:    "classic",
+			},
+		},
+	}, 5)
+	if err != nil {
+		t.Fatalf("EncodeListGroupsResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 77 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if err := reader.SkipTaggedFields(); err != nil {
+		t.Fatalf("skip response header tags: %v", err)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrListGroupsResponse()
+	kmsgResp.Version = 5
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Groups) != 1 || kmsgResp.Groups[0].Group != "group-1" {
+		t.Fatalf("unexpected list groups: %+v", kmsgResp.Groups)
+	}
+}
+
+func TestEncodeOffsetForLeaderEpochResponseV3KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeOffsetForLeaderEpochResponse(&OffsetForLeaderEpochResponse{
+		CorrelationID: 13,
+		ThrottleMs:    0,
+		Topics: []OffsetForLeaderEpochTopicResponse{
+			{
+				Name: "orders",
+				Partitions: []OffsetForLeaderEpochPartitionResponse{
+					{Partition: 0, ErrorCode: NONE, LeaderEpoch: 1, EndOffset: 12},
+				},
+			},
+		},
+	}, 3)
+	if err != nil {
+		t.Fatalf("EncodeOffsetForLeaderEpochResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 13 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrOffsetForLeaderEpochResponse()
+	kmsgResp.Version = 3
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Topics) != 1 || kmsgResp.Topics[0].Topic != "orders" {
+		t.Fatalf("unexpected response: %+v", kmsgResp.Topics)
+	}
+}
+
+func TestEncodeDescribeConfigsResponseV4KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeDescribeConfigsResponse(&DescribeConfigsResponse{
+		CorrelationID: 19,
+		ThrottleMs:    0,
+		Resources: []DescribeConfigsResponseResource{
+			{
+				ErrorCode:    NONE,
+				ResourceType: ConfigResourceTopic,
+				ResourceName: "orders",
+				Configs: []DescribeConfigsResponseConfig{
+					{
+						Name:        "retention.ms",
+						Value:       strPtr("1000"),
+						ReadOnly:    false,
+						IsDefault:   false,
+						Source:      ConfigSourceDynamicTopic,
+						IsSensitive: false,
+						ConfigType:  ConfigTypeLong,
+					},
+				},
+			},
+		},
+	}, 4)
+	if err != nil {
+		t.Fatalf("EncodeDescribeConfigsResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 19 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if err := reader.SkipTaggedFields(); err != nil {
+		t.Fatalf("skip response header tags: %v", err)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrDescribeConfigsResponse()
+	kmsgResp.Version = 4
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Resources) != 1 || kmsgResp.Resources[0].ResourceName != "orders" {
+		t.Fatalf("unexpected resources: %+v", kmsgResp.Resources)
+	}
+}
+
+func TestEncodeAlterConfigsResponseV1KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeAlterConfigsResponse(&AlterConfigsResponse{
+		CorrelationID: 27,
+		ThrottleMs:    0,
+		Resources: []AlterConfigsResponseResource{
+			{
+				ErrorCode:    NONE,
+				ResourceType: ConfigResourceTopic,
+				ResourceName: "orders",
+			},
+		},
+	}, 1)
+	if err != nil {
+		t.Fatalf("EncodeAlterConfigsResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 27 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrAlterConfigsResponse()
+	kmsgResp.Version = 1
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Resources) != 1 || kmsgResp.Resources[0].ResourceName != "orders" {
+		t.Fatalf("unexpected response: %+v", kmsgResp.Resources)
+	}
+}
+
+func TestEncodeCreatePartitionsResponseV3KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeCreatePartitionsResponse(&CreatePartitionsResponse{
+		CorrelationID: 33,
+		ThrottleMs:    0,
+		Topics: []CreatePartitionsResponseTopic{
+			{Name: "orders", ErrorCode: NONE},
+		},
+	}, 3)
+	if err != nil {
+		t.Fatalf("EncodeCreatePartitionsResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 33 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if err := reader.SkipTaggedFields(); err != nil {
+		t.Fatalf("skip response header tags: %v", err)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrCreatePartitionsResponse()
+	kmsgResp.Version = 3
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Topics) != 1 || kmsgResp.Topics[0].Topic != "orders" {
+		t.Fatalf("unexpected response: %+v", kmsgResp.Topics)
+	}
+}
+
+func TestEncodeDeleteGroupsResponseV2KmsgRoundTrip(t *testing.T) {
+	payload, err := EncodeDeleteGroupsResponse(&DeleteGroupsResponse{
+		CorrelationID: 35,
+		ThrottleMs:    0,
+		Groups: []DeleteGroupsResponseGroup{
+			{Group: "group-1", ErrorCode: NONE},
+		},
+	}, 2)
+	if err != nil {
+		t.Fatalf("EncodeDeleteGroupsResponse: %v", err)
+	}
+	reader := newByteReader(payload)
+	if corr, _ := reader.Int32(); corr != 35 {
+		t.Fatalf("unexpected correlation id %d", corr)
+	}
+	if err := reader.SkipTaggedFields(); err != nil {
+		t.Fatalf("skip response header tags: %v", err)
+	}
+	body := payload[reader.pos:]
+	kmsgResp := kmsg.NewPtrDeleteGroupsResponse()
+	kmsgResp.Version = 2
+	if err := kmsgResp.ReadFrom(body); err != nil {
+		t.Fatalf("kmsg decode: %v", err)
+	}
+	if len(kmsgResp.Groups) != 1 || kmsgResp.Groups[0].Group != "group-1" {
+		t.Fatalf("unexpected response: %+v", kmsgResp.Groups)
+	}
+}
+
 func TestEncodeFindCoordinatorResponseLegacy(t *testing.T) {
 	errMsg := "ok"
 	payload, err := EncodeFindCoordinatorResponse(&FindCoordinatorResponse{

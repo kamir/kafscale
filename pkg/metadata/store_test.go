@@ -180,6 +180,13 @@ func TestInMemoryStoreConsumerGroups(t *testing.T) {
 	if loaded == nil || loaded.GenerationId != 2 || loaded.Leader != "member-1" {
 		t.Fatalf("unexpected group data: %#v", loaded)
 	}
+	groups, err := store.ListConsumerGroups(context.Background())
+	if err != nil {
+		t.Fatalf("ListConsumerGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0].GetGroupId() != "group-1" {
+		t.Fatalf("unexpected list groups: %#v", groups)
+	}
 	if err := store.DeleteConsumerGroup(context.Background(), "group-1"); err != nil {
 		t.Fatalf("DeleteConsumerGroup: %v", err)
 	}
@@ -215,5 +222,40 @@ func TestInMemoryStoreCreateDeleteTopic(t *testing.T) {
 	meta, _ := store.Metadata(ctx, nil)
 	if len(meta.Topics) != 0 {
 		t.Fatalf("expected topic removed")
+	}
+}
+
+func TestInMemoryStoreTopicConfigAndPartitions(t *testing.T) {
+	store := NewInMemoryStore(ClusterMetadata{
+		Brokers: []protocol.MetadataBroker{{NodeID: 1}},
+	})
+	ctx := context.Background()
+	if _, err := store.CreateTopic(ctx, TopicSpec{Name: "orders", NumPartitions: 1, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	cfg, err := store.FetchTopicConfig(ctx, "orders")
+	if err != nil {
+		t.Fatalf("FetchTopicConfig: %v", err)
+	}
+	cfg.RetentionMs = 60000
+	if err := store.UpdateTopicConfig(ctx, cfg); err != nil {
+		t.Fatalf("UpdateTopicConfig: %v", err)
+	}
+	updated, err := store.FetchTopicConfig(ctx, "orders")
+	if err != nil {
+		t.Fatalf("FetchTopicConfig: %v", err)
+	}
+	if updated.RetentionMs != 60000 {
+		t.Fatalf("unexpected retention: %d", updated.RetentionMs)
+	}
+	if err := store.CreatePartitions(ctx, "orders", 3); err != nil {
+		t.Fatalf("CreatePartitions: %v", err)
+	}
+	meta, err := store.Metadata(ctx, []string{"orders"})
+	if err != nil {
+		t.Fatalf("Metadata: %v", err)
+	}
+	if len(meta.Topics) != 1 || len(meta.Topics[0].Partitions) != 3 {
+		t.Fatalf("unexpected partition count: %#v", meta.Topics)
 	}
 }

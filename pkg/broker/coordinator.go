@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -479,6 +480,115 @@ func (c *GroupCoordinator) OffsetFetch(ctx context.Context, req *protocol.Offset
 	}, nil
 }
 
+func (c *GroupCoordinator) DescribeGroups(ctx context.Context, req *protocol.DescribeGroupsRequest, correlationID int32) (*protocol.DescribeGroupsResponse, error) {
+	groups := make([]protocol.DescribeGroupsResponseGroup, 0, len(req.Groups))
+	for _, groupID := range req.Groups {
+		group, err := c.store.FetchConsumerGroup(ctx, groupID)
+		if err != nil {
+			groups = append(groups, protocol.DescribeGroupsResponseGroup{
+				ErrorCode: protocol.UNKNOWN_SERVER_ERROR,
+				GroupID:   groupID,
+			})
+			continue
+		}
+		if group == nil {
+			groups = append(groups, protocol.DescribeGroupsResponseGroup{
+				ErrorCode: protocol.GROUP_ID_NOT_FOUND,
+				GroupID:   groupID,
+			})
+			continue
+		}
+		groups = append(groups, buildDescribeGroup(group, req.IncludeAuthorizedOperations))
+	}
+	return &protocol.DescribeGroupsResponse{
+		CorrelationID: correlationID,
+		ThrottleMs:    0,
+		Groups:        groups,
+	}, nil
+}
+
+func (c *GroupCoordinator) ListGroups(ctx context.Context, req *protocol.ListGroupsRequest, correlationID int32) (*protocol.ListGroupsResponse, error) {
+	groups, err := c.store.ListConsumerGroups(ctx)
+	if err != nil {
+		return &protocol.ListGroupsResponse{
+			CorrelationID: correlationID,
+			ThrottleMs:    0,
+			ErrorCode:     protocol.UNKNOWN_SERVER_ERROR,
+			Groups:        nil,
+		}, nil
+	}
+	entries := make([]protocol.ListGroupsResponseGroup, 0, len(groups))
+	for _, group := range groups {
+		state := kafkaGroupState(group.GetState())
+		if !matchesGroupStateFilter(state, req.StatesFilter) {
+			continue
+		}
+		groupType := "classic"
+		if !matchesGroupTypeFilter(groupType, req.TypesFilter) {
+			continue
+		}
+		protocolType := group.GetProtocolType()
+		if protocolType == "" {
+			protocolType = "consumer"
+		}
+		entries = append(entries, protocol.ListGroupsResponseGroup{
+			GroupID:      group.GetGroupId(),
+			ProtocolType: protocolType,
+			GroupState:   state,
+			GroupType:    groupType,
+		})
+	}
+	return &protocol.ListGroupsResponse{
+		CorrelationID: correlationID,
+		ThrottleMs:    0,
+		ErrorCode:     protocol.NONE,
+		Groups:        entries,
+	}, nil
+}
+
+func (c *GroupCoordinator) DeleteGroups(ctx context.Context, req *protocol.DeleteGroupsRequest, correlationID int32) (*protocol.DeleteGroupsResponse, error) {
+	results := make([]protocol.DeleteGroupsResponseGroup, 0, len(req.Groups))
+	for _, groupID := range req.Groups {
+		result := protocol.DeleteGroupsResponseGroup{Group: groupID}
+		if strings.TrimSpace(groupID) == "" {
+			result.ErrorCode = protocol.INVALID_REQUEST
+			results = append(results, result)
+			continue
+		}
+		group, err := c.store.FetchConsumerGroup(ctx, groupID)
+		if err != nil {
+			result.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+			results = append(results, result)
+			continue
+		}
+		if group == nil {
+			result.ErrorCode = protocol.GROUP_ID_NOT_FOUND
+			c.deleteGroupState(groupID)
+			results = append(results, result)
+			continue
+		}
+		if err := c.store.DeleteConsumerGroup(ctx, groupID); err != nil {
+			result.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+			results = append(results, result)
+			continue
+		}
+		c.deleteGroupState(groupID)
+		result.ErrorCode = protocol.NONE
+		results = append(results, result)
+	}
+	return &protocol.DeleteGroupsResponse{
+		CorrelationID: correlationID,
+		ThrottleMs:    0,
+		Groups:        results,
+	}, nil
+}
+
+func (c *GroupCoordinator) deleteGroupState(groupID string) {
+	c.mu.Lock()
+	delete(c.groups, groupID)
+	c.mu.Unlock()
+}
+
 func (c *GroupCoordinator) ensureGroup(ctx context.Context, groupID string) (*groupState, error) {
 	if state, ok := c.groups[groupID]; ok {
 		return state, nil
@@ -561,6 +671,47 @@ func buildConsumerGroup(groupID string, state *groupState) *metadatapb.ConsumerG
 	return group
 }
 
+func buildDescribeGroup(group *metadatapb.ConsumerGroup, includeAuthorized bool) protocol.DescribeGroupsResponseGroup {
+	protocolType := group.GetProtocolType()
+	if protocolType == "" {
+		protocolType = "consumer"
+	}
+	protocolName := group.GetProtocol()
+	members := make([]protocol.DescribeGroupsResponseGroupMember, 0, len(group.Members))
+	memberIDs := make([]string, 0, len(group.Members))
+	for memberID := range group.Members {
+		memberIDs = append(memberIDs, memberID)
+	}
+	sort.Strings(memberIDs)
+	for _, memberID := range memberIDs {
+		member := group.Members[memberID]
+		if member == nil {
+			continue
+		}
+		members = append(members, protocol.DescribeGroupsResponseGroupMember{
+			MemberID:         memberID,
+			InstanceID:       nil,
+			ClientID:         member.ClientId,
+			ClientHost:       member.ClientHost,
+			ProtocolMetadata: nil,
+			MemberAssignment: nil,
+		})
+	}
+	authorizedOps := int32(-2147483648)
+	if includeAuthorized {
+		authorizedOps = 0
+	}
+	return protocol.DescribeGroupsResponseGroup{
+		ErrorCode:            protocol.NONE,
+		GroupID:              group.GetGroupId(),
+		State:                kafkaGroupState(group.GetState()),
+		ProtocolType:         protocolType,
+		Protocol:             protocolName,
+		Members:              members,
+		AuthorizedOperations: authorizedOps,
+	}
+}
+
 func restoreGroupState(group *metadatapb.ConsumerGroup) *groupState {
 	rebalanceTimeout := defaultRebalanceTimeout
 	if group.RebalanceTimeoutMs > 0 {
@@ -608,6 +759,54 @@ func restoreGroupState(group *metadatapb.ConsumerGroup) *groupState {
 	}
 	state.ensureLeader()
 	return state
+}
+
+func kafkaGroupState(state string) string {
+	switch strings.ToLower(state) {
+	case groupStatePreparingStr:
+		return "PreparingRebalance"
+	case groupStateCompletingStr:
+		return "CompletingRebalance"
+	case groupStateStableStr:
+		return "Stable"
+	case groupStateDeadStr:
+		return "Dead"
+	case groupStateEmptyStr:
+		return "Empty"
+	default:
+		return state
+	}
+}
+
+func normalizeGroupState(state string) string {
+	normalized := strings.ToLower(state)
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	return normalized
+}
+
+func matchesGroupStateFilter(state string, filters []string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	stateKey := normalizeGroupState(state)
+	for _, filter := range filters {
+		if normalizeGroupState(filter) == stateKey {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesGroupTypeFilter(groupType string, filters []string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	for _, filter := range filters {
+		if strings.EqualFold(filter, groupType) {
+			return true
+		}
+	}
+	return false
 }
 
 func groupPhaseString(state groupPhase) string {

@@ -65,15 +65,15 @@ Supported:
 - JoinGroup / SyncGroup / Heartbeat / LeaveGroup: v4
 - OffsetCommit: v3
 - OffsetFetch: v5
+- DescribeGroups: v5
+- ListGroups: v5
+- OffsetForLeaderEpoch: v3
+- DescribeConfigs: v4
+- AlterConfigs: v1
+- CreatePartitions: v0-3
+- DeleteGroups: v0-2
 - CreateTopics: v0
 - DeleteTopics: v0
-
-Planned (not yet supported):
-- DescribeGroups (15), ListGroups (16)
-- OffsetForLeaderEpoch (23)
-- DescribeConfigs (32), AlterConfigs (33)
-- CreatePartitions (37)
-- DeleteGroups (42)
 
 Explicitly unsupported:
 - Transactions and KRaft APIs
@@ -103,6 +103,7 @@ make test-consumer-group
 - `docs/user-guide.md` - running the platform
 - `docs/development.md` - dev workflow and test targets
 - `docs/operations.md` - ops guidance and etcd/S3 requirements
+- `docs/ops-api.md` - ops/admin API surface and examples
 - `docs/storage.md` - S3 layout and segment/index details
 
 A detailed architecture overview and design rationale are available here:

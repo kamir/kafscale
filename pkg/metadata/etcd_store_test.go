@@ -58,6 +58,56 @@ func TestEtcdStoreCreateTopicPersistsSnapshot(t *testing.T) {
 	waitForTopicInSnapshot(t, endpoints, "orders")
 }
 
+func TestEtcdStoreTopicConfigAndPartitions(t *testing.T) {
+	e, endpoints := startEmbeddedEtcd(t)
+	defer e.Close()
+
+	ctx := context.Background()
+	initial := ClusterMetadata{
+		Brokers: []protocol.MetadataBroker{
+			{NodeID: 1, Host: "broker-0", Port: 9092},
+		},
+		ControllerID: 1,
+	}
+	store, err := NewEtcdStore(ctx, initial, EtcdStoreConfig{Endpoints: endpoints})
+	if err != nil {
+		t.Fatalf("NewEtcdStore: %v", err)
+	}
+	if _, err := store.CreateTopic(ctx, TopicSpec{Name: "orders", NumPartitions: 1, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	cfg, err := store.FetchTopicConfig(ctx, "orders")
+	if err != nil {
+		t.Fatalf("FetchTopicConfig: %v", err)
+	}
+	cfg.RetentionMs = 120000
+	if err := store.UpdateTopicConfig(ctx, cfg); err != nil {
+		t.Fatalf("UpdateTopicConfig: %v", err)
+	}
+	updated, err := store.FetchTopicConfig(ctx, "orders")
+	if err != nil {
+		t.Fatalf("FetchTopicConfig: %v", err)
+	}
+	if updated.RetentionMs != 120000 {
+		t.Fatalf("unexpected retention: %d", updated.RetentionMs)
+	}
+	if err := store.CreatePartitions(ctx, "orders", 2); err != nil {
+		t.Fatalf("CreatePartitions: %v", err)
+	}
+
+	cli := newEtcdClient(t, endpoints)
+	defer cli.Close()
+	ctxTimeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := cli.Get(ctxTimeout, PartitionStateKey("orders", 1))
+	if err != nil {
+		t.Fatalf("get partition state: %v", err)
+	}
+	if resp.Count == 0 {
+		t.Fatalf("expected partition state for new partition")
+	}
+}
+
 func TestEtcdStoreDeleteTopicRemovesOffsets(t *testing.T) {
 	e, endpoints := startEmbeddedEtcd(t)
 	defer e.Close()
@@ -157,6 +207,13 @@ func TestEtcdStoreConsumerGroupPersistence(t *testing.T) {
 	}
 	if loaded == nil || loaded.GenerationId != 3 || loaded.Leader != "member-1" {
 		t.Fatalf("unexpected group data: %#v", loaded)
+	}
+	groups, err := store.ListConsumerGroups(ctx)
+	if err != nil {
+		t.Fatalf("ListConsumerGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0].GetGroupId() != "group-1" {
+		t.Fatalf("unexpected list groups: %#v", groups)
 	}
 	if err := store.DeleteConsumerGroup(ctx, "group-1"); err != nil {
 		t.Fatalf("DeleteConsumerGroup: %v", err)

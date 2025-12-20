@@ -33,6 +33,7 @@ import (
 	"github.com/novatechflow/kafscale/pkg/broker"
 	"github.com/novatechflow/kafscale/pkg/cache"
 	controlpb "github.com/novatechflow/kafscale/pkg/gen/control"
+	metadatapb "github.com/novatechflow/kafscale/pkg/gen/metadata"
 	"github.com/novatechflow/kafscale/pkg/metadata"
 	"github.com/novatechflow/kafscale/pkg/protocol"
 	"github.com/novatechflow/kafscale/pkg/storage"
@@ -72,6 +73,11 @@ type handler struct {
 	traceKafka           bool
 	produceRate          *throughputTracker
 	fetchRate            *throughputTracker
+	cacheSize            int
+	readAhead            int
+	segmentBytes         int
+	flushInterval        time.Duration
+	adminMetrics         *adminMetrics
 }
 
 func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, req protocol.Request) ([]byte, error) {
@@ -191,6 +197,22 @@ func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, re
 			return nil, err
 		}
 		return protocol.EncodeSyncGroupResponse(resp, header.APIVersion)
+	case *protocol.DescribeGroupsRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			resp, err := h.coordinator.DescribeGroups(ctx, req.(*protocol.DescribeGroupsRequest), header.CorrelationID)
+			if err != nil {
+				return nil, err
+			}
+			return protocol.EncodeDescribeGroupsResponse(resp, header.APIVersion)
+		})
+	case *protocol.ListGroupsRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			resp, err := h.coordinator.ListGroups(ctx, req.(*protocol.ListGroupsRequest), header.CorrelationID)
+			if err != nil {
+				return nil, err
+			}
+			return protocol.EncodeListGroupsResponse(resp, header.APIVersion)
+		})
 	case *protocol.HeartbeatRequest:
 		resp := h.coordinator.Heartbeat(ctx, req.(*protocol.HeartbeatRequest), header.CorrelationID)
 		return protocol.EncodeHeartbeatResponse(resp, header.APIVersion)
@@ -209,6 +231,30 @@ func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, re
 			return nil, err
 		}
 		return protocol.EncodeOffsetFetchResponse(resp, header.APIVersion)
+	case *protocol.OffsetForLeaderEpochRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			return h.handleOffsetForLeaderEpoch(ctx, header, req.(*protocol.OffsetForLeaderEpochRequest))
+		})
+	case *protocol.DescribeConfigsRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			return h.handleDescribeConfigs(ctx, header, req.(*protocol.DescribeConfigsRequest))
+		})
+	case *protocol.AlterConfigsRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			return h.handleAlterConfigs(ctx, header, req.(*protocol.AlterConfigsRequest))
+		})
+	case *protocol.CreatePartitionsRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			return h.handleCreatePartitions(ctx, header, req.(*protocol.CreatePartitionsRequest))
+		})
+	case *protocol.DeleteGroupsRequest:
+		return h.withAdminMetrics(header.APIKey, func() ([]byte, error) {
+			resp, err := h.coordinator.DeleteGroups(ctx, req.(*protocol.DeleteGroupsRequest), header.CorrelationID)
+			if err != nil {
+				return nil, err
+			}
+			return protocol.EncodeDeleteGroupsResponse(resp, header.APIVersion)
+		})
 	case *protocol.CreateTopicsRequest:
 		return h.handleCreateTopics(ctx, header, req.(*protocol.CreateTopicsRequest))
 	case *protocol.DeleteTopicsRequest:
@@ -262,6 +308,7 @@ func (h *handler) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP kafscale_fetch_rps Broker fetch throughput measured over the sliding window.")
 	fmt.Fprintln(w, "# TYPE kafscale_fetch_rps gauge")
 	fmt.Fprintf(w, "kafscale_fetch_rps %f\n", h.fetchRate.rate())
+	h.adminMetrics.writePrometheus(w)
 }
 
 func (h *handler) recordS3Op(op string, latency time.Duration, err error) {
@@ -269,6 +316,13 @@ func (h *handler) recordS3Op(op string, latency time.Duration, err error) {
 		return
 	}
 	h.s3Health.RecordOperation(op, latency, err)
+}
+
+func (h *handler) withAdminMetrics(apiKey int16, fn func() ([]byte, error)) ([]byte, error) {
+	start := time.Now()
+	payload, err := fn()
+	h.adminMetrics.Record(apiKey, time.Since(start), err)
+	return payload, err
 }
 
 func (h *handler) handleProduce(ctx context.Context, header *protocol.RequestHeader, req *protocol.ProduceRequest) ([]byte, error) {
@@ -413,6 +467,378 @@ func (h *handler) handleDeleteTopics(ctx context.Context, header *protocol.Reque
 		CorrelationID: header.CorrelationID,
 		Topics:        results,
 	})
+}
+
+const (
+	configRetentionMs    = "retention.ms"
+	configRetentionBytes = "retention.bytes"
+	configSegmentBytes   = "segment.bytes"
+	configBrokerID       = "broker.id"
+	configAdvertised     = "advertised.listeners"
+	configS3Bucket       = "kafscale.s3.bucket"
+	configS3Region       = "kafscale.s3.region"
+	configS3Endpoint     = "kafscale.s3.endpoint"
+	configCacheBytes     = "kafscale.cache.bytes"
+	configReadAhead      = "kafscale.readahead.segments"
+	configSegmentBytesB  = "kafscale.segment.bytes"
+	configFlushInterval  = "kafscale.flush.interval.ms"
+)
+
+func (h *handler) handleOffsetForLeaderEpoch(ctx context.Context, header *protocol.RequestHeader, req *protocol.OffsetForLeaderEpochRequest) ([]byte, error) {
+	topics := make([]string, 0, len(req.Topics))
+	for _, topic := range req.Topics {
+		topics = append(topics, topic.Name)
+	}
+	meta, err := h.store.Metadata(ctx, topics)
+	if err != nil {
+		return nil, err
+	}
+	metaIndex := make(map[string]protocol.MetadataTopic, len(meta.Topics))
+	for _, topic := range meta.Topics {
+		metaIndex[topic.Name] = topic
+	}
+	respTopics := make([]protocol.OffsetForLeaderEpochTopicResponse, 0, len(req.Topics))
+	for _, topic := range req.Topics {
+		metaTopic, ok := metaIndex[topic.Name]
+		partIndex := make(map[int32]protocol.MetadataPartition, len(metaTopic.Partitions))
+		if ok {
+			for _, part := range metaTopic.Partitions {
+				partIndex[part.PartitionIndex] = part
+			}
+		}
+		partitions := make([]protocol.OffsetForLeaderEpochPartitionResponse, 0, len(topic.Partitions))
+		for _, part := range topic.Partitions {
+			if !ok {
+				partitions = append(partitions, protocol.OffsetForLeaderEpochPartitionResponse{
+					Partition:   part.Partition,
+					ErrorCode:   protocol.UNKNOWN_TOPIC_OR_PARTITION,
+					LeaderEpoch: -1,
+					EndOffset:   -1,
+				})
+				continue
+			}
+			metaPart, exists := partIndex[part.Partition]
+			if !exists {
+				partitions = append(partitions, protocol.OffsetForLeaderEpochPartitionResponse{
+					Partition:   part.Partition,
+					ErrorCode:   protocol.UNKNOWN_TOPIC_OR_PARTITION,
+					LeaderEpoch: -1,
+					EndOffset:   -1,
+				})
+				continue
+			}
+			nextOffset, err := h.store.NextOffset(ctx, topic.Name, part.Partition)
+			if err != nil {
+				partitions = append(partitions, protocol.OffsetForLeaderEpochPartitionResponse{
+					Partition:   part.Partition,
+					ErrorCode:   protocol.UNKNOWN_SERVER_ERROR,
+					LeaderEpoch: -1,
+					EndOffset:   -1,
+				})
+				continue
+			}
+			partitions = append(partitions, protocol.OffsetForLeaderEpochPartitionResponse{
+				Partition:   part.Partition,
+				ErrorCode:   protocol.NONE,
+				LeaderEpoch: metaPart.LeaderEpoch,
+				EndOffset:   nextOffset,
+			})
+		}
+		respTopics = append(respTopics, protocol.OffsetForLeaderEpochTopicResponse{
+			Name:       topic.Name,
+			Partitions: partitions,
+		})
+	}
+	return protocol.EncodeOffsetForLeaderEpochResponse(&protocol.OffsetForLeaderEpochResponse{
+		CorrelationID: header.CorrelationID,
+		ThrottleMs:    0,
+		Topics:        respTopics,
+	}, header.APIVersion)
+}
+
+func (h *handler) handleDescribeConfigs(ctx context.Context, header *protocol.RequestHeader, req *protocol.DescribeConfigsRequest) ([]byte, error) {
+	resources := make([]protocol.DescribeConfigsResponseResource, 0, len(req.Resources))
+	for _, resource := range req.Resources {
+		switch resource.ResourceType {
+		case protocol.ConfigResourceTopic:
+			cfg, err := h.store.FetchTopicConfig(ctx, resource.ResourceName)
+			if err != nil {
+				resources = append(resources, protocol.DescribeConfigsResponseResource{
+					ErrorCode:    protocol.UNKNOWN_TOPIC_OR_PARTITION,
+					ResourceType: resource.ResourceType,
+					ResourceName: resource.ResourceName,
+				})
+				continue
+			}
+			configs := h.topicConfigEntries(cfg, resource.ConfigNames)
+			resources = append(resources, protocol.DescribeConfigsResponseResource{
+				ErrorCode:    protocol.NONE,
+				ResourceType: resource.ResourceType,
+				ResourceName: resource.ResourceName,
+				Configs:      configs,
+			})
+		case protocol.ConfigResourceBroker:
+			configs := h.brokerConfigEntries(resource.ConfigNames)
+			resources = append(resources, protocol.DescribeConfigsResponseResource{
+				ErrorCode:    protocol.NONE,
+				ResourceType: resource.ResourceType,
+				ResourceName: resource.ResourceName,
+				Configs:      configs,
+			})
+		default:
+			resources = append(resources, protocol.DescribeConfigsResponseResource{
+				ErrorCode:    protocol.INVALID_REQUEST,
+				ResourceType: resource.ResourceType,
+				ResourceName: resource.ResourceName,
+			})
+		}
+	}
+	return protocol.EncodeDescribeConfigsResponse(&protocol.DescribeConfigsResponse{
+		CorrelationID: header.CorrelationID,
+		ThrottleMs:    0,
+		Resources:     resources,
+	}, header.APIVersion)
+}
+
+func (h *handler) handleAlterConfigs(ctx context.Context, header *protocol.RequestHeader, req *protocol.AlterConfigsRequest) ([]byte, error) {
+	resources := make([]protocol.AlterConfigsResponseResource, 0, len(req.Resources))
+	for _, resource := range req.Resources {
+		if resource.ResourceType != protocol.ConfigResourceTopic || resource.ResourceName == "" {
+			resources = append(resources, protocol.AlterConfigsResponseResource{
+				ErrorCode:    protocol.INVALID_REQUEST,
+				ResourceType: resource.ResourceType,
+				ResourceName: resource.ResourceName,
+			})
+			continue
+		}
+		cfg, err := h.store.FetchTopicConfig(ctx, resource.ResourceName)
+		if err != nil {
+			resources = append(resources, protocol.AlterConfigsResponseResource{
+				ErrorCode:    protocol.UNKNOWN_TOPIC_OR_PARTITION,
+				ResourceType: resource.ResourceType,
+				ResourceName: resource.ResourceName,
+			})
+			continue
+		}
+		updated := *cfg
+		if updated.Config == nil {
+			updated.Config = make(map[string]string)
+		}
+		errorCode := protocol.NONE
+		for _, entry := range resource.Configs {
+			if entry.Value == nil {
+				errorCode = protocol.INVALID_CONFIG
+				break
+			}
+			switch entry.Name {
+			case configRetentionMs:
+				value, err := parseConfigInt64(*entry.Value)
+				if err != nil || (value < 0 && value != -1) {
+					errorCode = protocol.INVALID_CONFIG
+					break
+				}
+				updated.RetentionMs = value
+			case configRetentionBytes:
+				value, err := parseConfigInt64(*entry.Value)
+				if err != nil || (value < 0 && value != -1) {
+					errorCode = protocol.INVALID_CONFIG
+					break
+				}
+				updated.RetentionBytes = value
+			case configSegmentBytes:
+				value, err := parseConfigInt64(*entry.Value)
+				if err != nil || value <= 0 {
+					errorCode = protocol.INVALID_CONFIG
+					break
+				}
+				updated.SegmentBytes = value
+			default:
+				errorCode = protocol.INVALID_CONFIG
+			}
+			if errorCode != protocol.NONE {
+				break
+			}
+		}
+		if errorCode == protocol.NONE && !req.ValidateOnly {
+			if err := h.store.UpdateTopicConfig(ctx, &updated); err != nil {
+				errorCode = protocol.UNKNOWN_SERVER_ERROR
+			}
+		}
+		resources = append(resources, protocol.AlterConfigsResponseResource{
+			ErrorCode:    errorCode,
+			ResourceType: resource.ResourceType,
+			ResourceName: resource.ResourceName,
+		})
+	}
+	return protocol.EncodeAlterConfigsResponse(&protocol.AlterConfigsResponse{
+		CorrelationID: header.CorrelationID,
+		ThrottleMs:    0,
+		Resources:     resources,
+	}, header.APIVersion)
+}
+
+func (h *handler) handleCreatePartitions(ctx context.Context, header *protocol.RequestHeader, req *protocol.CreatePartitionsRequest) ([]byte, error) {
+	results := make([]protocol.CreatePartitionsResponseTopic, 0, len(req.Topics))
+	seen := make(map[string]struct{}, len(req.Topics))
+	for _, topic := range req.Topics {
+		result := protocol.CreatePartitionsResponseTopic{Name: topic.Name}
+		if strings.TrimSpace(topic.Name) == "" {
+			result.ErrorCode = protocol.INVALID_TOPIC_EXCEPTION
+			msg := "invalid topic name"
+			result.ErrorMessage = &msg
+			results = append(results, result)
+			continue
+		}
+		if _, ok := seen[topic.Name]; ok {
+			result.ErrorCode = protocol.INVALID_REQUEST
+			msg := "duplicate topic in request"
+			result.ErrorMessage = &msg
+			results = append(results, result)
+			continue
+		}
+		seen[topic.Name] = struct{}{}
+		if topic.Count <= 0 {
+			result.ErrorCode = protocol.INVALID_PARTITIONS
+			msg := "invalid partition count"
+			result.ErrorMessage = &msg
+			results = append(results, result)
+			continue
+		}
+		if len(topic.Assignments) > 0 {
+			result.ErrorCode = protocol.INVALID_REQUEST
+			msg := "replica assignment not supported"
+			result.ErrorMessage = &msg
+			results = append(results, result)
+			continue
+		}
+		var err error
+		if req.ValidateOnly {
+			err = h.validateCreatePartitions(ctx, topic.Name, topic.Count)
+		} else {
+			err = h.store.CreatePartitions(ctx, topic.Name, topic.Count)
+		}
+		if err != nil {
+			switch {
+			case errors.Is(err, metadata.ErrUnknownTopic):
+				result.ErrorCode = protocol.UNKNOWN_TOPIC_OR_PARTITION
+			case errors.Is(err, metadata.ErrInvalidTopic):
+				result.ErrorCode = protocol.INVALID_PARTITIONS
+			default:
+				result.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+			}
+			msg := err.Error()
+			result.ErrorMessage = &msg
+		}
+		results = append(results, result)
+	}
+	return protocol.EncodeCreatePartitionsResponse(&protocol.CreatePartitionsResponse{
+		CorrelationID: header.CorrelationID,
+		ThrottleMs:    0,
+		Topics:        results,
+	}, header.APIVersion)
+}
+
+func (h *handler) validateCreatePartitions(ctx context.Context, topic string, count int32) error {
+	meta, err := h.store.Metadata(ctx, []string{topic})
+	if err != nil {
+		return err
+	}
+	if len(meta.Topics) == 0 || meta.Topics[0].ErrorCode != 0 {
+		return metadata.ErrUnknownTopic
+	}
+	current := int32(len(meta.Topics[0].Partitions))
+	if count <= current {
+		return metadata.ErrInvalidTopic
+	}
+	return nil
+}
+
+func (h *handler) topicConfigEntries(cfg *metadatapb.TopicConfig, requested []string) []protocol.DescribeConfigsResponseConfig {
+	allow := configNameSet(requested)
+	entries := make([]protocol.DescribeConfigsResponseConfig, 0, 3)
+	retentionMs, retentionMsDefault := normalizeRetention(cfg.RetentionMs)
+	retentionBytes, retentionBytesDefault := normalizeRetention(cfg.RetentionBytes)
+	segmentBytes, segmentDefault := normalizeSegmentBytes(cfg.SegmentBytes, int64(h.segmentBytes))
+
+	entries = appendConfigEntry(entries, allow, configRetentionMs, retentionMs, retentionMsDefault, protocol.ConfigTypeLong, false)
+	entries = appendConfigEntry(entries, allow, configRetentionBytes, retentionBytes, retentionBytesDefault, protocol.ConfigTypeLong, false)
+	entries = appendConfigEntry(entries, allow, configSegmentBytes, segmentBytes, segmentDefault, protocol.ConfigTypeInt, false)
+	return entries
+}
+
+func (h *handler) brokerConfigEntries(requested []string) []protocol.DescribeConfigsResponseConfig {
+	allow := configNameSet(requested)
+	entries := make([]protocol.DescribeConfigsResponseConfig, 0, 8)
+	entries = appendConfigEntry(entries, allow, configBrokerID, fmt.Sprintf("%d", h.brokerInfo.NodeID), true, protocol.ConfigTypeInt, true)
+	entries = appendConfigEntry(entries, allow, configAdvertised, fmt.Sprintf("%s:%d", h.brokerInfo.Host, h.brokerInfo.Port), true, protocol.ConfigTypeString, true)
+	entries = appendConfigEntry(entries, allow, configS3Bucket, os.Getenv("KAFSCALE_S3_BUCKET"), true, protocol.ConfigTypeString, true)
+	entries = appendConfigEntry(entries, allow, configS3Region, os.Getenv("KAFSCALE_S3_REGION"), true, protocol.ConfigTypeString, true)
+	entries = appendConfigEntry(entries, allow, configS3Endpoint, os.Getenv("KAFSCALE_S3_ENDPOINT"), true, protocol.ConfigTypeString, true)
+	entries = appendConfigEntry(entries, allow, configCacheBytes, fmt.Sprintf("%d", h.cacheSize), true, protocol.ConfigTypeLong, true)
+	entries = appendConfigEntry(entries, allow, configReadAhead, fmt.Sprintf("%d", h.readAhead), true, protocol.ConfigTypeInt, true)
+	entries = appendConfigEntry(entries, allow, configSegmentBytesB, fmt.Sprintf("%d", h.segmentBytes), true, protocol.ConfigTypeInt, true)
+	entries = appendConfigEntry(entries, allow, configFlushInterval, fmt.Sprintf("%d", int64(h.flushInterval/time.Millisecond)), true, protocol.ConfigTypeLong, true)
+	return entries
+}
+
+func configNameSet(names []string) map[string]struct{} {
+	if names == nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
+func appendConfigEntry(entries []protocol.DescribeConfigsResponseConfig, allow map[string]struct{}, name string, value string, isDefault bool, configType int8, readOnly bool) []protocol.DescribeConfigsResponseConfig {
+	if allow != nil {
+		if _, ok := allow[name]; !ok {
+			return entries
+		}
+	}
+	val := value
+	entries = append(entries, protocol.DescribeConfigsResponseConfig{
+		Name:        name,
+		Value:       &val,
+		ReadOnly:    readOnly,
+		IsDefault:   isDefault,
+		Source:      chooseConfigSource(isDefault, readOnly),
+		IsSensitive: false,
+		Synonyms:    nil,
+		ConfigType:  configType,
+	})
+	return entries
+}
+
+func chooseConfigSource(isDefault bool, readOnly bool) int8 {
+	if isDefault {
+		return protocol.ConfigSourceDefaultConfig
+	}
+	if readOnly {
+		return protocol.ConfigSourceStaticBroker
+	}
+	return protocol.ConfigSourceDynamicTopic
+}
+
+func normalizeRetention(value int64) (string, bool) {
+	if value == 0 {
+		value = -1
+	}
+	return fmt.Sprintf("%d", value), value == -1
+}
+
+func normalizeSegmentBytes(value int64, fallback int64) (string, bool) {
+	if value <= 0 {
+		return fmt.Sprintf("%d", fallback), true
+	}
+	return fmt.Sprintf("%d", value), false
+}
+
+func parseConfigInt64(value string) (int64, error) {
+	trimmed := strings.TrimSpace(value)
+	return strconv.ParseInt(trimmed, 10, 64)
 }
 
 func (h *handler) handleListOffsets(ctx context.Context, header *protocol.RequestHeader, req *protocol.ListOffsetsRequest) ([]byte, error) {
@@ -755,6 +1181,11 @@ func newHandler(store metadata.Store, s3Client storage.S3Client, brokerInfo prot
 		traceKafka:           traceKafka,
 		produceRate:          newThroughputTracker(throughputWindow),
 		fetchRate:            newThroughputTracker(throughputWindow),
+		cacheSize:            cacheSize,
+		readAhead:            readAhead,
+		segmentBytes:         segmentBytes,
+		flushInterval:        flushInterval,
+		adminMetrics:         newAdminMetrics(),
 	}
 }
 
@@ -1106,17 +1537,20 @@ func generateApiVersions() []protocol.ApiVersion {
 		{key: protocol.APIKeyLeaveGroup, minVersion: 4, maxVersion: 4},
 		{key: protocol.APIKeyOffsetCommit, minVersion: 3, maxVersion: 3},
 		{key: protocol.APIKeyOffsetFetch, minVersion: 5, maxVersion: 5},
+		{key: protocol.APIKeyDescribeGroups, minVersion: 5, maxVersion: 5},
+		{key: protocol.APIKeyListGroups, minVersion: 5, maxVersion: 5},
+		{key: protocol.APIKeyOffsetForLeaderEpoch, minVersion: 3, maxVersion: 3},
+		{key: protocol.APIKeyDescribeConfigs, minVersion: 4, maxVersion: 4},
+		{key: protocol.APIKeyAlterConfigs, minVersion: 1, maxVersion: 1},
+		{key: protocol.APIKeyCreatePartitions, minVersion: 0, maxVersion: 3},
 		{key: protocol.APIKeyCreateTopics, minVersion: 0, maxVersion: 0},
 		{key: protocol.APIKeyDeleteTopics, minVersion: 0, maxVersion: 0},
+		{key: protocol.APIKeyDeleteGroups, minVersion: 0, maxVersion: 2},
 	}
 	unsupported := []int16{
 		4, 5, 6, 7,
-		15, 16,
 		21, 22,
 		24, 25, 26,
-		37,
-		protocol.APIKeyDescribeConfigs,
-		protocol.APIKeyDeleteGroups,
 	}
 
 	entries := make([]protocol.ApiVersion, 0, len(supported)+len(unsupported))

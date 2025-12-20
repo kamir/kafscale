@@ -17,6 +17,7 @@ package metadata
 
 import (
 	"fmt"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -43,6 +44,24 @@ func PartitionStateKey(topic string, partition int32) string {
 // ConsumerGroupKey returns the etcd key for a consumer group metadata blob.
 func ConsumerGroupKey(groupID string) string {
 	return fmt.Sprintf("%s/%s/metadata", consumerGroupPrefix, groupID)
+}
+
+// ConsumerGroupPrefix returns the etcd prefix for consumer groups.
+func ConsumerGroupPrefix() string {
+	return consumerGroupPrefix
+}
+
+// ParseConsumerGroupID extracts a group ID from a metadata key.
+func ParseConsumerGroupID(key string) (string, bool) {
+	prefix := consumerGroupPrefix + "/"
+	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, "/metadata") {
+		return "", false
+	}
+	groupID := strings.TrimSuffix(strings.TrimPrefix(key, prefix), "/metadata")
+	if groupID == "" || strings.Contains(groupID, "/") {
+		return "", false
+	}
+	return groupID, true
 }
 
 // ConsumerOffsetKey returns the etcd key holding the committed offset for a partition.

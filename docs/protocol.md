@@ -34,21 +34,16 @@ Kafscale implements a focused subset of the Kafka protocol. Versions below refle
 | 12 | Heartbeat | 4 | Consumer liveness (v4 only) |
 | 13 | LeaveGroup | 4 | Graceful consumer shutdown (v4 only) |
 | 14 | SyncGroup | 4 | Partition assignment (v4 only) |
+| 15 | DescribeGroups | 5 | Ops visibility |
+| 16 | ListGroups | 5 | Ops visibility |
+| 23 | OffsetForLeaderEpoch | 3 | Safe consumer recovery |
 | 18 | ApiVersions | 0 | Client capability negotiation (v0 only) |
 | 19 | CreateTopics | 0 | Topic management (v0 only) |
 | 20 | DeleteTopics | 0 | Topic management (v0 only) |
-
-## Planned (Not Yet Supported)
-
-| API Key | Name | Notes |
-|---------|------|-------|
-| 15 | DescribeGroups | Ops debugging |
-| 16 | ListGroups | Ops debugging |
-| 23 | OffsetForLeaderEpoch | Safe consumer recovery |
-| 32 | DescribeConfigs | Read topic/broker config |
-| 33 | AlterConfigs | Runtime config changes |
-| 37 | CreatePartitions | Scale partitions |
-| 42 | DeleteGroups | Consumer group cleanup |
+| 32 | DescribeConfigs | 4 | Read topic/broker config |
+| 33 | AlterConfigs | 1 | Runtime config changes (whitelist) |
+| 37 | CreatePartitions | 0-3 | Scale partitions |
+| 42 | DeleteGroups | 0-2 | Consumer group cleanup |
 
 ## Explicitly Unsupported
 

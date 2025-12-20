@@ -33,10 +33,13 @@ func init() {
 }
 
 type MetricsSnapshot struct {
-	S3State     string
-	S3LatencyMS int
-	ProduceRPS  float64
-	FetchRPS    float64
+	S3State                 string
+	S3LatencyMS             int
+	ProduceRPS              float64
+	FetchRPS                float64
+	AdminRequestsTotal      float64
+	AdminRequestErrorsTotal float64
+	AdminRequestLatencyMS   float64
 }
 
 type MetricsProvider interface {
@@ -133,6 +136,7 @@ type s3Status struct {
 }
 
 type brokerNode struct {
+	ID           int32  `json:"id"`
 	Name         string `json:"name"`
 	State        string `json:"state"`
 	Partitions   int    `json:"partitions"`
@@ -231,12 +235,18 @@ func (h *consoleHandlers) handleMetrics(w http.ResponseWriter, r *http.Request) 
 					metrics["s3_latency_ms"] = snap.S3LatencyMS
 					metrics["produce_rps"] = snap.ProduceRPS
 					metrics["fetch_rps"] = snap.FetchRPS
+					metrics["admin_requests_total"] = snap.AdminRequestsTotal
+					metrics["admin_errors_total"] = snap.AdminRequestErrorsTotal
+					metrics["admin_latency_ms_avg"] = snap.AdminRequestLatencyMS
 				}
 			}
 			if len(metrics) == 0 {
 				metrics["s3_latency_ms"] = 40 + rand.Intn(60)
 				metrics["produce_rps"] = 2000 + rand.Intn(500)
 				metrics["fetch_rps"] = 1800 + rand.Intn(600)
+				metrics["admin_requests_total"] = 0
+				metrics["admin_errors_total"] = 0
+				metrics["admin_latency_ms_avg"] = 0
 			}
 			sample["metrics"] = metrics
 			b, _ := json.Marshal(sample)
@@ -278,6 +288,7 @@ func statusFromMetadata(meta *metadata.ClusterMetadata, metrics *MetricsSnapshot
 	}
 	for _, broker := range meta.Brokers {
 		resp.Brokers.Nodes = append(resp.Brokers.Nodes, brokerNode{
+			ID:           broker.NodeID,
 			Name:         broker.Host,
 			State:        "ready",
 			Partitions:   0,

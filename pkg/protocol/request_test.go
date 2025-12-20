@@ -129,6 +129,207 @@ func TestParseProduceRequestInvalidCompactArray(t *testing.T) {
 	}
 }
 
+func TestParseDescribeGroupsRequestV5(t *testing.T) {
+	w := newByteWriter(64)
+	w.Int16(APIKeyDescribeGroups)
+	w.Int16(5)
+	w.Int32(11)
+	w.NullableString(nil)
+	w.WriteTaggedFields(0) // header tags
+	w.CompactArrayLen(2)
+	w.CompactString("group-1")
+	w.CompactString("group-2")
+	w.Bool(true)
+	w.WriteTaggedFields(0) // request tags
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*DescribeGroupsRequest)
+	if !ok {
+		t.Fatalf("expected DescribeGroupsRequest got %T", req)
+	}
+	if len(parsed.Groups) != 2 || parsed.Groups[0] != "group-1" {
+		t.Fatalf("unexpected groups: %#v", parsed.Groups)
+	}
+	if !parsed.IncludeAuthorizedOperations {
+		t.Fatalf("expected IncludeAuthorizedOperations true")
+	}
+}
+
+func TestParseListGroupsRequestV5(t *testing.T) {
+	w := newByteWriter(64)
+	w.Int16(APIKeyListGroups)
+	w.Int16(5)
+	w.Int32(12)
+	w.NullableString(nil)
+	w.WriteTaggedFields(0) // header tags
+	w.CompactArrayLen(1)
+	w.CompactString("Stable")
+	w.CompactArrayLen(1)
+	w.CompactString("classic")
+	w.WriteTaggedFields(0) // request tags
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*ListGroupsRequest)
+	if !ok {
+		t.Fatalf("expected ListGroupsRequest got %T", req)
+	}
+	if len(parsed.StatesFilter) != 1 || parsed.StatesFilter[0] != "Stable" {
+		t.Fatalf("unexpected states filter: %#v", parsed.StatesFilter)
+	}
+	if len(parsed.TypesFilter) != 1 || parsed.TypesFilter[0] != "classic" {
+		t.Fatalf("unexpected types filter: %#v", parsed.TypesFilter)
+	}
+}
+
+func TestParseOffsetForLeaderEpochRequestV3(t *testing.T) {
+	w := newByteWriter(64)
+	w.Int16(APIKeyOffsetForLeaderEpoch)
+	w.Int16(3)
+	w.Int32(21)
+	w.NullableString(nil)
+	w.Int32(-1) // replica id
+	w.Int32(1)  // topic count
+	w.String("logs")
+	w.Int32(1) // partition count
+	w.Int32(0) // partition
+	w.Int32(1) // current leader epoch
+	w.Int32(1) // leader epoch
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*OffsetForLeaderEpochRequest)
+	if !ok {
+		t.Fatalf("expected OffsetForLeaderEpochRequest got %T", req)
+	}
+	if parsed.ReplicaID != -1 || len(parsed.Topics) != 1 || parsed.Topics[0].Name != "logs" {
+		t.Fatalf("unexpected offset for leader epoch request: %#v", parsed)
+	}
+}
+
+func TestParseDescribeConfigsRequestV4(t *testing.T) {
+	w := newByteWriter(128)
+	w.Int16(APIKeyDescribeConfigs)
+	w.Int16(4)
+	w.Int32(31)
+	w.NullableString(nil)
+	w.WriteTaggedFields(0)
+	w.CompactArrayLen(1)
+	w.Int8(ConfigResourceTopic)
+	w.CompactString("orders")
+	w.CompactArrayLen(2)
+	w.CompactString("retention.ms")
+	w.CompactString("segment.bytes")
+	w.WriteTaggedFields(0) // resource tags
+	w.Bool(false)          // include synonyms
+	w.Bool(false)          // include docs
+	w.WriteTaggedFields(0)
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*DescribeConfigsRequest)
+	if !ok {
+		t.Fatalf("expected DescribeConfigsRequest got %T", req)
+	}
+	if len(parsed.Resources) != 1 || parsed.Resources[0].ResourceName != "orders" {
+		t.Fatalf("unexpected describe configs request: %#v", parsed)
+	}
+}
+
+func TestParseAlterConfigsRequestV1(t *testing.T) {
+	w := newByteWriter(128)
+	w.Int16(APIKeyAlterConfigs)
+	w.Int16(1)
+	w.Int32(41)
+	w.NullableString(nil)
+	w.Int32(1) // resource count
+	w.Int8(ConfigResourceTopic)
+	w.String("orders")
+	w.Int32(1)
+	w.String("retention.ms")
+	value := "1000"
+	w.NullableString(&value)
+	w.Bool(false)
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*AlterConfigsRequest)
+	if !ok {
+		t.Fatalf("expected AlterConfigsRequest got %T", req)
+	}
+	if len(parsed.Resources) != 1 || parsed.Resources[0].ResourceName != "orders" {
+		t.Fatalf("unexpected alter configs request: %#v", parsed)
+	}
+}
+
+func TestParseCreatePartitionsRequestV3(t *testing.T) {
+	w := newByteWriter(128)
+	w.Int16(APIKeyCreatePartitions)
+	w.Int16(3)
+	w.Int32(55)
+	w.NullableString(nil)
+	w.WriteTaggedFields(0)
+	w.CompactArrayLen(1)
+	w.CompactString("orders")
+	w.Int32(6)
+	w.CompactArrayLen(-1) // assignments null
+	w.WriteTaggedFields(0)
+	w.Int32(15000)
+	w.Bool(false)
+	w.WriteTaggedFields(0)
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*CreatePartitionsRequest)
+	if !ok {
+		t.Fatalf("expected CreatePartitionsRequest got %T", req)
+	}
+	if len(parsed.Topics) != 1 || parsed.Topics[0].Name != "orders" || parsed.Topics[0].Count != 6 {
+		t.Fatalf("unexpected create partitions request: %#v", parsed)
+	}
+	if parsed.ValidateOnly {
+		t.Fatalf("expected ValidateOnly false")
+	}
+}
+
+func TestParseDeleteGroupsRequestV2(t *testing.T) {
+	w := newByteWriter(64)
+	w.Int16(APIKeyDeleteGroups)
+	w.Int16(2)
+	w.Int32(57)
+	w.NullableString(nil)
+	w.WriteTaggedFields(0)
+	w.CompactArrayLen(2)
+	w.CompactString("group-1")
+	w.CompactString("group-2")
+	w.WriteTaggedFields(0)
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	parsed, ok := req.(*DeleteGroupsRequest)
+	if !ok {
+		t.Fatalf("expected DeleteGroupsRequest got %T", req)
+	}
+	if len(parsed.Groups) != 2 || parsed.Groups[1] != "group-2" {
+		t.Fatalf("unexpected delete groups request: %#v", parsed)
+	}
+}
+
 func TestParseProduceRequestFranzEncoding(t *testing.T) {
 	req := kmsg.NewPtrProduceRequest()
 	req.Version = 9

@@ -195,12 +195,138 @@ func (s *EtcdStore) FetchConsumerGroup(ctx context.Context, groupID string) (*me
 	return DecodeConsumerGroup(resp.Kvs[0].Value)
 }
 
+// ListConsumerGroups returns all persisted consumer groups.
+func (s *EtcdStore) ListConsumerGroups(ctx context.Context) ([]*metadatapb.ConsumerGroup, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resp, err := s.client.Get(ctx, ConsumerGroupPrefix(), clientv3.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]*metadatapb.ConsumerGroup, 0, len(resp.Kvs))
+	for _, kv := range resp.Kvs {
+		if _, ok := ParseConsumerGroupID(string(kv.Key)); !ok {
+			continue
+		}
+		group, err := DecodeConsumerGroup(kv.Value)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, group)
+	}
+	return groups, nil
+}
+
 // DeleteConsumerGroup removes persisted consumer group metadata.
 func (s *EtcdStore) DeleteConsumerGroup(ctx context.Context, groupID string) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	_, err := s.client.Delete(ctx, ConsumerGroupKey(groupID))
 	return err
+}
+
+// FetchTopicConfig loads topic configuration from etcd or falls back to defaults.
+func (s *EtcdStore) FetchTopicConfig(ctx context.Context, topic string) (*metadatapb.TopicConfig, error) {
+	if topic == "" {
+		return nil, ErrInvalidTopic
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resp, err := s.client.Get(ctx, TopicConfigKey(topic))
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Kvs) > 0 {
+		return DecodeTopicConfig(resp.Kvs[0].Value)
+	}
+	meta, err := s.metadata.Metadata(ctx, []string{topic})
+	if err != nil {
+		return nil, err
+	}
+	if len(meta.Topics) == 0 || meta.Topics[0].ErrorCode != 0 {
+		return nil, ErrUnknownTopic
+	}
+	return defaultTopicConfigFromTopic(&meta.Topics[0], int16(len(meta.Topics[0].Partitions))), nil
+}
+
+// UpdateTopicConfig persists topic configuration into etcd.
+func (s *EtcdStore) UpdateTopicConfig(ctx context.Context, cfg *metadatapb.TopicConfig) error {
+	if cfg == nil || cfg.Name == "" {
+		return ErrInvalidTopic
+	}
+	meta, err := s.metadata.Metadata(ctx, []string{cfg.Name})
+	if err != nil {
+		return err
+	}
+	if len(meta.Topics) == 0 || meta.Topics[0].ErrorCode != 0 {
+		return ErrUnknownTopic
+	}
+	if cfg.Partitions == 0 {
+		cfg.Partitions = int32(len(meta.Topics[0].Partitions))
+	}
+	if err := s.metadata.UpdateTopicConfig(ctx, cfg); err != nil {
+		return err
+	}
+	payload, err := EncodeTopicConfig(cfg)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, err = s.client.Put(ctx, TopicConfigKey(cfg.Name), string(payload))
+	return err
+}
+
+// CreatePartitions expands a topic and writes new partition state entries.
+func (s *EtcdStore) CreatePartitions(ctx context.Context, topic string, partitionCount int32) error {
+	meta, err := s.metadata.Metadata(ctx, []string{topic})
+	if err != nil {
+		return err
+	}
+	if len(meta.Topics) == 0 || meta.Topics[0].ErrorCode != 0 {
+		return ErrUnknownTopic
+	}
+	current := int32(len(meta.Topics[0].Partitions))
+	if partitionCount <= current {
+		return ErrInvalidTopic
+	}
+	if err := s.metadata.CreatePartitions(ctx, topic, partitionCount); err != nil {
+		return err
+	}
+	if err := s.persistSnapshot(ctx); err != nil {
+		return err
+	}
+	updated, err := s.metadata.Metadata(ctx, []string{topic})
+	if err != nil {
+		return err
+	}
+	if len(updated.Topics) == 0 || updated.Topics[0].ErrorCode != 0 {
+		return ErrUnknownTopic
+	}
+	for i := current; i < partitionCount; i++ {
+		part := updated.Topics[0].Partitions[i]
+		state := &metadatapb.PartitionState{
+			Topic:          topic,
+			Partition:      part.PartitionIndex,
+			LeaderBroker:   fmt.Sprintf("%d", part.LeaderID),
+			LeaderEpoch:    part.LeaderEpoch,
+			LogStartOffset: 0,
+			LogEndOffset:   0,
+			HighWatermark:  0,
+			ActiveSegment:  "",
+		}
+		payload, err := EncodePartitionState(state)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		_, err = s.client.Put(ctx, PartitionStateKey(topic, part.PartitionIndex), string(payload))
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CreateTopic currently updates only the in-memory snapshot; the operator is still responsible

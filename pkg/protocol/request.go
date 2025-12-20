@@ -221,6 +221,96 @@ type OffsetFetchRequest struct {
 
 func (OffsetFetchRequest) APIKey() int16 { return APIKeyOffsetFetch }
 
+type OffsetForLeaderEpochPartition struct {
+	Partition          int32
+	CurrentLeaderEpoch int32
+	LeaderEpoch        int32
+}
+
+type OffsetForLeaderEpochTopic struct {
+	Name       string
+	Partitions []OffsetForLeaderEpochPartition
+}
+
+type OffsetForLeaderEpochRequest struct {
+	ReplicaID int32
+	Topics    []OffsetForLeaderEpochTopic
+}
+
+func (OffsetForLeaderEpochRequest) APIKey() int16 { return APIKeyOffsetForLeaderEpoch }
+
+type DescribeConfigsResource struct {
+	ResourceType int8
+	ResourceName string
+	ConfigNames  []string
+}
+
+type DescribeConfigsRequest struct {
+	Resources            []DescribeConfigsResource
+	IncludeSynonyms      bool
+	IncludeDocumentation bool
+}
+
+func (DescribeConfigsRequest) APIKey() int16 { return APIKeyDescribeConfigs }
+
+type AlterConfigsResourceConfig struct {
+	Name  string
+	Value *string
+}
+
+type AlterConfigsResource struct {
+	ResourceType int8
+	ResourceName string
+	Configs      []AlterConfigsResourceConfig
+}
+
+type AlterConfigsRequest struct {
+	Resources    []AlterConfigsResource
+	ValidateOnly bool
+}
+
+func (AlterConfigsRequest) APIKey() int16 { return APIKeyAlterConfigs }
+
+type CreatePartitionsAssignment struct {
+	Replicas []int32
+}
+
+type CreatePartitionsTopic struct {
+	Name        string
+	Count       int32
+	Assignments []CreatePartitionsAssignment
+}
+
+type CreatePartitionsRequest struct {
+	Topics       []CreatePartitionsTopic
+	TimeoutMs    int32
+	ValidateOnly bool
+}
+
+func (CreatePartitionsRequest) APIKey() int16 { return APIKeyCreatePartitions }
+
+type DeleteGroupsRequest struct {
+	Groups []string
+}
+
+func (DeleteGroupsRequest) APIKey() int16 { return APIKeyDeleteGroups }
+
+// DescribeGroupsRequest asks for metadata about consumer groups.
+type DescribeGroupsRequest struct {
+	Groups                      []string
+	IncludeAuthorizedOperations bool
+}
+
+func (DescribeGroupsRequest) APIKey() int16 { return APIKeyDescribeGroups }
+
+// ListGroupsRequest enumerates consumer groups with optional filters.
+type ListGroupsRequest struct {
+	StatesFilter []string
+	TypesFilter  []string
+}
+
+func (ListGroupsRequest) APIKey() int16 { return APIKeyListGroups }
+
 func isFlexibleRequest(apiKey, version int16) bool {
 	switch apiKey {
 	case APIKeyProduce:
@@ -235,6 +325,20 @@ func isFlexibleRequest(apiKey, version int16) bool {
 		return version >= 4
 	case APIKeyHeartbeat:
 		return version >= 4
+	case APIKeyListGroups:
+		return version >= 3
+	case APIKeyDescribeGroups:
+		return version >= 5
+	case APIKeyOffsetForLeaderEpoch:
+		return version >= 4
+	case APIKeyDescribeConfigs:
+		return version >= 4
+	case APIKeyAlterConfigs:
+		return version >= 2
+	case APIKeyCreatePartitions:
+		return version >= 2
+	case APIKeyDeleteGroups:
+		return version >= 2
 	default:
 		return false
 	}
@@ -1111,6 +1215,512 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 			GroupID: groupID,
 			Topics:  topics,
 		}
+	case APIKeyOffsetForLeaderEpoch:
+		replicaID := int32(-2)
+		if header.APIVersion >= 3 {
+			if replicaID, err = reader.Int32(); err != nil {
+				return nil, nil, fmt.Errorf("read offset for leader epoch replica id: %w", err)
+			}
+		}
+		var topicCount int32
+		if flexible {
+			topicCount, err = compactArrayLenNonNull(reader)
+		} else {
+			topicCount, err = reader.Int32()
+			if topicCount < 0 {
+				return nil, nil, fmt.Errorf("offset for leader epoch topic count invalid %d", topicCount)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read offset for leader epoch topic count: %w", err)
+		}
+		topics := make([]OffsetForLeaderEpochTopic, 0, topicCount)
+		for i := int32(0); i < topicCount; i++ {
+			var name string
+			if flexible {
+				name, err = reader.CompactString()
+			} else {
+				name, err = reader.String()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read offset for leader epoch topic[%d]: %w", i, err)
+			}
+			var partCount int32
+			if flexible {
+				partCount, err = compactArrayLenNonNull(reader)
+			} else {
+				partCount, err = reader.Int32()
+				if partCount < 0 {
+					return nil, nil, fmt.Errorf("offset for leader epoch partition count invalid %d", partCount)
+				}
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read offset for leader epoch partition count: %w", err)
+			}
+			partitions := make([]OffsetForLeaderEpochPartition, 0, partCount)
+			for j := int32(0); j < partCount; j++ {
+				partitionID, err := reader.Int32()
+				if err != nil {
+					return nil, nil, fmt.Errorf("read offset for leader epoch partition: %w", err)
+				}
+				currentLeaderEpoch := int32(-1)
+				if header.APIVersion >= 2 {
+					if currentLeaderEpoch, err = reader.Int32(); err != nil {
+						return nil, nil, fmt.Errorf("read offset for leader epoch current leader epoch: %w", err)
+					}
+				}
+				leaderEpoch, err := reader.Int32()
+				if err != nil {
+					return nil, nil, fmt.Errorf("read offset for leader epoch leader epoch: %w", err)
+				}
+				if flexible {
+					if err := reader.SkipTaggedFields(); err != nil {
+						return nil, nil, fmt.Errorf("skip offset for leader epoch partition tags: %w", err)
+					}
+				}
+				partitions = append(partitions, OffsetForLeaderEpochPartition{
+					Partition:          partitionID,
+					CurrentLeaderEpoch: currentLeaderEpoch,
+					LeaderEpoch:        leaderEpoch,
+				})
+			}
+			topics = append(topics, OffsetForLeaderEpochTopic{Name: name, Partitions: partitions})
+			if flexible {
+				if err := reader.SkipTaggedFields(); err != nil {
+					return nil, nil, fmt.Errorf("skip offset for leader epoch topic tags: %w", err)
+				}
+			}
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip offset for leader epoch tags: %w", err)
+			}
+		}
+		req = &OffsetForLeaderEpochRequest{
+			ReplicaID: replicaID,
+			Topics:    topics,
+		}
+	case APIKeyDescribeConfigs:
+		var resourceCount int32
+		if flexible {
+			resourceCount, err = compactArrayLenNonNull(reader)
+		} else {
+			resourceCount, err = reader.Int32()
+			if resourceCount < 0 {
+				return nil, nil, fmt.Errorf("describe configs resource count invalid %d", resourceCount)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read describe configs resource count: %w", err)
+		}
+		resources := make([]DescribeConfigsResource, 0, resourceCount)
+		for i := int32(0); i < resourceCount; i++ {
+			resourceType, err := reader.Int8()
+			if err != nil {
+				return nil, nil, fmt.Errorf("read describe configs resource type: %w", err)
+			}
+			var resourceName string
+			if flexible {
+				resourceName, err = reader.CompactString()
+			} else {
+				resourceName, err = reader.String()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read describe configs resource name: %w", err)
+			}
+			var configCount int32
+			if flexible {
+				configCount, err = reader.CompactArrayLen()
+			} else {
+				configCount, err = reader.Int32()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read describe configs config count: %w", err)
+			}
+			var configNames []string
+			if configCount >= 0 {
+				configNames = make([]string, 0, configCount)
+				for j := int32(0); j < configCount; j++ {
+					var name string
+					if flexible {
+						name, err = reader.CompactString()
+					} else {
+						name, err = reader.String()
+					}
+					if err != nil {
+						return nil, nil, fmt.Errorf("read describe configs config name: %w", err)
+					}
+					configNames = append(configNames, name)
+				}
+			}
+			if flexible {
+				if err := reader.SkipTaggedFields(); err != nil {
+					return nil, nil, fmt.Errorf("skip describe configs resource tags: %w", err)
+				}
+			}
+			resources = append(resources, DescribeConfigsResource{
+				ResourceType: resourceType,
+				ResourceName: resourceName,
+				ConfigNames:  configNames,
+			})
+		}
+		includeSynonyms := false
+		if header.APIVersion >= 1 {
+			if includeSynonyms, err = reader.Bool(); err != nil {
+				return nil, nil, fmt.Errorf("read describe configs include synonyms: %w", err)
+			}
+		}
+		includeDocumentation := false
+		if header.APIVersion >= 3 {
+			if includeDocumentation, err = reader.Bool(); err != nil {
+				return nil, nil, fmt.Errorf("read describe configs include docs: %w", err)
+			}
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip describe configs tags: %w", err)
+			}
+		}
+		req = &DescribeConfigsRequest{
+			Resources:            resources,
+			IncludeSynonyms:      includeSynonyms,
+			IncludeDocumentation: includeDocumentation,
+		}
+	case APIKeyAlterConfigs:
+		var resourceCount int32
+		if flexible {
+			resourceCount, err = compactArrayLenNonNull(reader)
+		} else {
+			resourceCount, err = reader.Int32()
+			if resourceCount < 0 {
+				return nil, nil, fmt.Errorf("alter configs resource count invalid %d", resourceCount)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read alter configs resource count: %w", err)
+		}
+		resources := make([]AlterConfigsResource, 0, resourceCount)
+		for i := int32(0); i < resourceCount; i++ {
+			resourceType, err := reader.Int8()
+			if err != nil {
+				return nil, nil, fmt.Errorf("read alter configs resource type: %w", err)
+			}
+			var resourceName string
+			if flexible {
+				resourceName, err = reader.CompactString()
+			} else {
+				resourceName, err = reader.String()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read alter configs resource name: %w", err)
+			}
+			var configCount int32
+			if flexible {
+				configCount, err = compactArrayLenNonNull(reader)
+			} else {
+				configCount, err = reader.Int32()
+				if configCount < 0 {
+					return nil, nil, fmt.Errorf("alter configs config count invalid %d", configCount)
+				}
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read alter configs config count: %w", err)
+			}
+			configs := make([]AlterConfigsResourceConfig, 0, configCount)
+			for j := int32(0); j < configCount; j++ {
+				var name string
+				if flexible {
+					name, err = reader.CompactString()
+				} else {
+					name, err = reader.String()
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("read alter configs config name: %w", err)
+				}
+				var value *string
+				if flexible {
+					value, err = reader.CompactNullableString()
+				} else {
+					value, err = reader.NullableString()
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("read alter configs config value: %w", err)
+				}
+				if flexible {
+					if err := reader.SkipTaggedFields(); err != nil {
+						return nil, nil, fmt.Errorf("skip alter configs config tags: %w", err)
+					}
+				}
+				configs = append(configs, AlterConfigsResourceConfig{Name: name, Value: value})
+			}
+			if flexible {
+				if err := reader.SkipTaggedFields(); err != nil {
+					return nil, nil, fmt.Errorf("skip alter configs resource tags: %w", err)
+				}
+			}
+			resources = append(resources, AlterConfigsResource{
+				ResourceType: resourceType,
+				ResourceName: resourceName,
+				Configs:      configs,
+			})
+		}
+		validateOnly, err := reader.Bool()
+		if err != nil {
+			return nil, nil, fmt.Errorf("read alter configs validate only: %w", err)
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip alter configs tags: %w", err)
+			}
+		}
+		req = &AlterConfigsRequest{
+			Resources:    resources,
+			ValidateOnly: validateOnly,
+		}
+	case APIKeyCreatePartitions:
+		var topicCount int32
+		if flexible {
+			topicCount, err = compactArrayLenNonNull(reader)
+		} else {
+			topicCount, err = reader.Int32()
+			if topicCount < 0 {
+				return nil, nil, fmt.Errorf("create partitions topic count invalid %d", topicCount)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read create partitions topic count: %w", err)
+		}
+		topics := make([]CreatePartitionsTopic, 0, topicCount)
+		for i := int32(0); i < topicCount; i++ {
+			var name string
+			if flexible {
+				name, err = reader.CompactString()
+			} else {
+				name, err = reader.String()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read create partitions topic[%d] name: %w", i, err)
+			}
+			count, err := reader.Int32()
+			if err != nil {
+				return nil, nil, fmt.Errorf("read create partitions topic[%d] count: %w", i, err)
+			}
+			var assignmentCount int32
+			if flexible {
+				assignmentCount, err = reader.CompactArrayLen()
+			} else {
+				assignmentCount, err = reader.Int32()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read create partitions topic[%d] assignment count: %w", i, err)
+			}
+			var assignments []CreatePartitionsAssignment
+			if assignmentCount >= 0 {
+				assignments = make([]CreatePartitionsAssignment, 0, assignmentCount)
+				for j := int32(0); j < assignmentCount; j++ {
+					var replicaCount int32
+					if flexible {
+						replicaCount, err = compactArrayLenNonNull(reader)
+					} else {
+						replicaCount, err = reader.Int32()
+						if replicaCount < 0 {
+							return nil, nil, fmt.Errorf("create partitions topic[%d] assignment[%d] replica count invalid %d", i, j, replicaCount)
+						}
+					}
+					if err != nil {
+						return nil, nil, fmt.Errorf("read create partitions topic[%d] assignment[%d] replica count: %w", i, j, err)
+					}
+					replicas := make([]int32, 0, replicaCount)
+					for k := int32(0); k < replicaCount; k++ {
+						replica, err := reader.Int32()
+						if err != nil {
+							return nil, nil, fmt.Errorf("read create partitions topic[%d] assignment[%d] replica[%d]: %w", i, j, k, err)
+						}
+						replicas = append(replicas, replica)
+					}
+					if flexible {
+						if err := reader.SkipTaggedFields(); err != nil {
+							return nil, nil, fmt.Errorf("skip create partitions assignment tags: %w", err)
+						}
+					}
+					assignments = append(assignments, CreatePartitionsAssignment{Replicas: replicas})
+				}
+			} else if assignmentCount < -1 {
+				return nil, nil, fmt.Errorf("create partitions topic[%d] assignment count invalid %d", i, assignmentCount)
+			}
+			if flexible {
+				if err := reader.SkipTaggedFields(); err != nil {
+					return nil, nil, fmt.Errorf("skip create partitions topic tags: %w", err)
+				}
+			}
+			topics = append(topics, CreatePartitionsTopic{
+				Name:        name,
+				Count:       count,
+				Assignments: assignments,
+			})
+		}
+		timeoutMs, err := reader.Int32()
+		if err != nil {
+			return nil, nil, fmt.Errorf("read create partitions timeout: %w", err)
+		}
+		validateOnly, err := reader.Bool()
+		if err != nil {
+			return nil, nil, fmt.Errorf("read create partitions validate only: %w", err)
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip create partitions tags: %w", err)
+			}
+		}
+		req = &CreatePartitionsRequest{
+			Topics:       topics,
+			TimeoutMs:    timeoutMs,
+			ValidateOnly: validateOnly,
+		}
+	case APIKeyDeleteGroups:
+		var count int32
+		if flexible {
+			count, err = compactArrayLenNonNull(reader)
+		} else {
+			count, err = reader.Int32()
+			if count < 0 {
+				return nil, nil, fmt.Errorf("delete groups count invalid %d", count)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read delete groups count: %w", err)
+		}
+		groups := make([]string, 0, count)
+		for i := int32(0); i < count; i++ {
+			var group string
+			if flexible {
+				group, err = reader.CompactString()
+			} else {
+				group, err = reader.String()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read delete groups[%d]: %w", i, err)
+			}
+			groups = append(groups, group)
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip delete groups tags: %w", err)
+			}
+		}
+		req = &DeleteGroupsRequest{Groups: groups}
+	case APIKeyDescribeGroups:
+		var count int32
+		if flexible {
+			count, err = compactArrayLenNonNull(reader)
+		} else {
+			count, err = reader.Int32()
+			if count < 0 {
+				return nil, nil, fmt.Errorf("describe groups count invalid %d", count)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("read describe groups count: %w", err)
+		}
+		groups := make([]string, 0, count)
+		for i := int32(0); i < count; i++ {
+			var group string
+			if flexible {
+				group, err = reader.CompactString()
+			} else {
+				group, err = reader.String()
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read describe group[%d]: %w", i, err)
+			}
+			groups = append(groups, group)
+		}
+		includeAuthorizedOperations := false
+		if header.APIVersion >= 3 {
+			if includeAuthorizedOperations, err = reader.Bool(); err != nil {
+				return nil, nil, fmt.Errorf("read describe groups include auth ops: %w", err)
+			}
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip describe groups tags: %w", err)
+			}
+		}
+		req = &DescribeGroupsRequest{
+			Groups:                      groups,
+			IncludeAuthorizedOperations: includeAuthorizedOperations,
+		}
+	case APIKeyListGroups:
+		var (
+			states []string
+			types  []string
+		)
+		if header.APIVersion >= 4 {
+			var count int32
+			if flexible {
+				count, err = reader.CompactArrayLen()
+			} else {
+				count, err = reader.Int32()
+				if count < 0 {
+					return nil, nil, fmt.Errorf("list groups states count invalid %d", count)
+				}
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read list groups states count: %w", err)
+			}
+			if count < 0 {
+				count = 0
+			}
+			states = make([]string, 0, count)
+			for i := int32(0); i < count; i++ {
+				var state string
+				if flexible {
+					state, err = reader.CompactString()
+				} else {
+					state, err = reader.String()
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("read list groups state[%d]: %w", i, err)
+				}
+				states = append(states, state)
+			}
+		}
+		if header.APIVersion >= 5 {
+			var count int32
+			if flexible {
+				count, err = reader.CompactArrayLen()
+			} else {
+				count, err = reader.Int32()
+				if count < 0 {
+					return nil, nil, fmt.Errorf("list groups types count invalid %d", count)
+				}
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("read list groups types count: %w", err)
+			}
+			if count < 0 {
+				count = 0
+			}
+			types = make([]string, 0, count)
+			for i := int32(0); i < count; i++ {
+				var groupType string
+				if flexible {
+					groupType, err = reader.CompactString()
+				} else {
+					groupType, err = reader.String()
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("read list groups type[%d]: %w", i, err)
+				}
+				types = append(types, groupType)
+			}
+		}
+		if flexible {
+			if err := reader.SkipTaggedFields(); err != nil {
+				return nil, nil, fmt.Errorf("skip list groups tags: %w", err)
+			}
+		}
+		req = &ListGroupsRequest{StatesFilter: states, TypesFilter: types}
 	default:
 		return nil, nil, fmt.Errorf("unsupported api key %d", header.APIKey)
 	}

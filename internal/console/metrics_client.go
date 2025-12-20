@@ -53,10 +53,14 @@ func (c *promMetricsClient) Snapshot(ctx context.Context) (*MetricsSnapshot, err
 		return nil, fmt.Errorf("metrics request failed: %s", resp.Status)
 	}
 	var (
-		state      string
-		latencyMS  int
-		produceRPS float64
-		fetchRPS   float64
+		state             string
+		latencyMS         int
+		produceRPS        float64
+		fetchRPS          float64
+		adminReqTotal     float64
+		adminErrTotal     float64
+		adminLatencySum   float64
+		adminLatencyCount int
 	)
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
@@ -80,16 +84,36 @@ func (c *promMetricsClient) Snapshot(ctx context.Context) (*MetricsSnapshot, err
 			if val, ok := parsePromSample(line); ok {
 				fetchRPS = val
 			}
+		case strings.HasPrefix(line, "kafscale_admin_requests_total"):
+			if val, ok := parsePromSample(line); ok {
+				adminReqTotal += val
+			}
+		case strings.HasPrefix(line, "kafscale_admin_request_errors_total"):
+			if val, ok := parsePromSample(line); ok {
+				adminErrTotal += val
+			}
+		case strings.HasPrefix(line, "kafscale_admin_request_latency_ms_avg"):
+			if val, ok := parsePromSample(line); ok {
+				adminLatencySum += val
+				adminLatencyCount++
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+	adminLatencyAvg := 0.0
+	if adminLatencyCount > 0 {
+		adminLatencyAvg = adminLatencySum / float64(adminLatencyCount)
+	}
 	return &MetricsSnapshot{
-		S3State:     state,
-		S3LatencyMS: latencyMS,
-		ProduceRPS:  produceRPS,
-		FetchRPS:    fetchRPS,
+		S3State:                 state,
+		S3LatencyMS:             latencyMS,
+		ProduceRPS:              produceRPS,
+		FetchRPS:                fetchRPS,
+		AdminRequestsTotal:      adminReqTotal,
+		AdminRequestErrorsTotal: adminErrTotal,
+		AdminRequestLatencyMS:   adminLatencyAvg,
 	}, nil
 }
 

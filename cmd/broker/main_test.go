@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	"github.com/novatechflow/kafscale/pkg/broker"
 	controlpb "github.com/novatechflow/kafscale/pkg/gen/control"
@@ -307,6 +308,37 @@ func TestHandleCreateDeleteTopics(t *testing.T) {
 	}
 	if delResp.Topics[1].ErrorCode != protocol.UNKNOWN_TOPIC_OR_PARTITION {
 		t.Fatalf("expected unknown topic error got %d", delResp.Topics[1].ErrorCode)
+	}
+}
+
+func TestHandleCreatePartitions(t *testing.T) {
+	store := metadata.NewInMemoryStore(defaultMetadata())
+	handler := newTestHandler(store)
+
+	req := &protocol.CreatePartitionsRequest{
+		Topics: []protocol.CreatePartitionsTopic{
+			{Name: "orders", Count: 2},
+		},
+		TimeoutMs:    1000,
+		ValidateOnly: false,
+	}
+	payload, err := handler.handleCreatePartitions(context.Background(), &protocol.RequestHeader{
+		CorrelationID: 51,
+		APIVersion:    3,
+	}, req)
+	if err != nil {
+		t.Fatalf("handleCreatePartitions: %v", err)
+	}
+	resp := decodeCreatePartitionsResponse(t, payload, 3)
+	if len(resp.Topics) != 1 || resp.Topics[0].ErrorCode != 0 {
+		t.Fatalf("unexpected create partitions response: %+v", resp.Topics)
+	}
+	meta, err := store.Metadata(context.Background(), []string{"orders"})
+	if err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if len(meta.Topics) != 1 || len(meta.Topics[0].Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got: %+v", meta.Topics)
 	}
 }
 
@@ -864,6 +896,28 @@ func decodeDeleteTopicsResponse(t *testing.T, payload []byte) *protocol.DeleteTo
 	return resp
 }
 
+func decodeCreatePartitionsResponse(t *testing.T, payload []byte, version int16) *kmsg.CreatePartitionsResponse {
+	t.Helper()
+	reader := bytes.NewReader(payload)
+	var corr int32
+	if err := binary.Read(reader, binary.BigEndian, &corr); err != nil {
+		t.Fatalf("read correlation id: %v", err)
+	}
+	if version >= 2 {
+		skipTaggedFields(t, reader)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	resp := kmsg.NewPtrCreatePartitionsResponse()
+	resp.Version = version
+	if err := resp.ReadFrom(body); err != nil {
+		t.Fatalf("decode create partitions response: %v", err)
+	}
+	return resp
+}
+
 func decodeListOffsetsResponse(t *testing.T, version int16, payload []byte) *protocol.ListOffsetsResponse {
 	t.Helper()
 	reader := bytes.NewReader(payload)
@@ -1143,6 +1197,30 @@ func TestMetricsHandlerExposesS3Health(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `kafscale_s3_health_state{state="degraded"} 1`) {
 		t.Fatalf("expected degraded metric, got:\n%s", body)
+	}
+}
+
+func TestMetricsHandlerExposesAdminMetrics(t *testing.T) {
+	store := metadata.NewInMemoryStore(defaultMetadata())
+	handler := newTestHandler(store)
+	req := &protocol.DescribeConfigsRequest{
+		Resources: []protocol.DescribeConfigsResource{
+			{ResourceType: protocol.ConfigResourceTopic, ResourceName: "orders"},
+		},
+	}
+	header := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyDescribeConfigs,
+		APIVersion:    4,
+		CorrelationID: 1,
+	}
+	if _, err := handler.Handle(context.Background(), header, req); err != nil {
+		t.Fatalf("handle describe configs: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	handler.metricsHandler(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `kafscale_admin_requests_total{api="DescribeConfigs"} 1`) {
+		t.Fatalf("expected admin metrics, got:\n%s", body)
 	}
 }
 

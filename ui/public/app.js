@@ -81,6 +81,7 @@ function renderBrokers(nodes) {
     card.className = 'broker-card';
     card.innerHTML = `
       <div><span class="status-dot ${node.state}"></span><strong>${node.name}</strong></div>
+      <div>ID: ${node.id ?? 'unknown'}</div>
       <div>State: ${node.state.toUpperCase()}</div>
       <div>Partitions: ${node.partitions}</div>
       <div>CPU: ${node.cpu}% · Mem: ${node.memory}%</div>
@@ -94,6 +95,9 @@ function startMetricsStream() {
   const produceEl = document.getElementById('produce-rps');
   const fetchEl = document.getElementById('fetch-rps');
   const latencyEl = document.getElementById('live-s3-latency');
+  const adminReqEl = document.getElementById('admin-requests');
+  const adminErrEl = document.getElementById('admin-errors');
+  const adminLatencyEl = document.getElementById('admin-latency');
   const status = document.getElementById('metrics-status');
   if (metricsSource) {
     metricsSource.close();
@@ -106,6 +110,9 @@ function startMetricsStream() {
       setMetricValue(produceEl, metrics.produce_rps);
       setMetricValue(fetchEl, metrics.fetch_rps);
       setMetricValue(latencyEl, metrics.s3_latency_ms);
+      setMetricValue(adminReqEl, metrics.admin_requests_total);
+      setMetricValue(adminErrEl, metrics.admin_errors_total);
+      setMetricValue(adminLatencyEl, metrics.admin_latency_ms_avg);
       if (payload.timestamp) {
         const ts = new Date(payload.timestamp);
         status.textContent = `Last update ${ts.toLocaleTimeString()}`;

@@ -70,6 +70,36 @@
         "defaults": {"unit": "ms"},
         "overrides": []
       }
+    },
+    {
+      "type": "timeseries",
+      "title": "Admin API Requests",
+      "gridPos": {"x": 0, "y": 11, "w": 12, "h": 7},
+      "targets": [
+        {
+          "expr": "sum(rate(kafscale_admin_requests_total[5m])) by (api)",
+          "legendFormat": "{{api}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "req/s"},
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Admin API Errors",
+      "gridPos": {"x": 12, "y": 11, "w": 12, "h": 7},
+      "targets": [
+        {
+          "expr": "sum(rate(kafscale_admin_request_errors_total[5m])) by (api)",
+          "legendFormat": "{{api}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "req/s"},
+        "overrides": []
+      }
     }
   ],
   "templating": {
