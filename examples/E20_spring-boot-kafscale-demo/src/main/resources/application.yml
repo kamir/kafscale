@@ -14,7 +14,7 @@
 # limitations under the License.
 
 server:
-  port: 8083
+  port: 8093
 
 logging:
   level:
