@@ -17,12 +17,13 @@ MVN_CMD ?= docker run --rm -v "$(PWD)":/app -w /app maven:3.9-eclipse-temurin-11
 KAFSCALE_BOOTSTRAP_SERVERS ?= host.docker.internal:39092
 KAFSCALE_SETUP_PROFILE ?= default
 
-.PHONY: help build-jar build-jar-standalone docker-net up down submit submit-local logs clean status
+.PHONY: help build-jar build-jar-standalone run-jar-standalone docker-net up down submit submit-local logs clean status
 
 help:
 	@echo "Targets:"
 	@echo "  build-jar  Build the Flink job jar (dependencies shaded)"
 	@echo "  build-jar-standalone  Build jar with standalone profile (resources on classpath)"
+	@echo "  run-jar-standalone    Run jar locally (no Docker), using standalone profile"
 	@echo "  up         Start Flink standalone (JobManager + TaskManager) in Docker"
 	@echo "  down       Stop and remove Flink containers + network"
 	@echo "  submit     Submit the job jar to the Flink JobManager"
@@ -41,6 +42,10 @@ build-jar:
 
 build-jar-standalone:
 	$(MVN_CMD) -Pstandalone -DskipTests package
+
+run-jar-standalone:
+	mvn -Pstandalone -DskipTests package \
+	  exec:exec -Dexec.executable=java -Dexec.args="-jar target/flink-kafscale-demo.jar"
 
 # Create a dedicated network so the Flink containers can resolve each other
 

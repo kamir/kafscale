@@ -9,6 +9,7 @@
 * [Spring Boot Configuration](03-spring-boot-configuration.md)
 * [Running Your Application](04-running-your-app.md)
 * [Flink Word Count Demo](07-flink-wordcount-demo.md)
+* [Spark Word Count Demo](08-spark-wordcount-demo.md)
 
 ## Reference
 

@@ -38,8 +38,9 @@ Before you begin, make sure you have:
 3. [**Spring Boot Configuration**](03-spring-boot-configuration.md) - Configure your application
 4. [**Running Your Application**](04-running-your-app.md) - Platform demo with E20
 5. [**Flink Word Count Demo**](07-flink-wordcount-demo.md) - Stream processing with E30
-6. [**Troubleshooting**](05-troubleshooting.md) - Common issues and solutions
-7. [**Next Steps**](06-next-steps.md) - Production deployment and advanced topics
+6. [**Spark Word Count Demo**](08-spark-wordcount-demo.md) - Stream processing with E40
+7. [**Troubleshooting**](05-troubleshooting.md) - Common issues and solutions
+8. [**Next Steps**](06-next-steps.md) - Production deployment and advanced topics
 
 ## Picking a Deployment Mode
 
