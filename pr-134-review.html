@@ -1,0 +1,1697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PR #134 — LFS Feature Review</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; line-height: 1.5; }
+  h1 { color: #f0f6fc; margin-bottom: 8px; font-size: 28px; }
+  h2 { color: #f0f6fc; margin: 32px 0 16px; font-size: 20px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+  h3 { color: #8b949e; font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin: 24px 0 12px; }
+  .subtitle { color: #8b949e; margin-bottom: 24px; font-size: 15px; }
+  .stats { display: flex; gap: 16px; margin: 20px 0; flex-wrap: wrap; }
+  .stat { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 16px 24px; min-width: 140px; }
+  .stat-value { font-size: 32px; font-weight: 700; color: #f0f6fc; }
+  .stat-label { font-size: 13px; color: #8b949e; margin-top: 4px; }
+  .stat-green .stat-value { color: #3fb950; }
+  .stat-red .stat-value { color: #f85149; }
+  .stat-blue .stat-value { color: #58a6ff; }
+  .stat-orange .stat-value { color: #d29922; }
+  .comparison { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 20px; margin: 20px 0; display: flex; align-items: center; gap: 20px; }
+  .comparison .arrow { font-size: 28px; color: #3fb950; }
+  .comparison .side { flex: 1; }
+  .comparison .side-label { font-size: 13px; color: #8b949e; }
+  .comparison .side-value { font-size: 24px; font-weight: 700; }
+  .comparison .bad { color: #f85149; }
+  .comparison .good { color: #3fb950; }
+  .group { background: #161b22; border: 1px solid #21262d; border-radius: 8px; margin: 12px 0; overflow: hidden; }
+  .group-header { padding: 12px 16px; background: #1c2128; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .group-header:hover { background: #22272e; }
+  .group-title { font-weight: 600; color: #e6edf3; }
+  .group-meta { font-size: 13px; color: #8b949e; display: flex; gap: 12px; }
+  .group-files { border-top: 1px solid #21262d; }
+  .file-row { padding: 6px 16px; display: flex; align-items: center; gap: 12px; font-size: 13px; font-family: 'SF Mono', 'Fira Code', monospace; border-bottom: 1px solid #21262d; }
+  .file-row:last-child { border-bottom: none; }
+  .file-row:hover { background: #1c2128; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .file-path { flex: 1; word-break: break-all; }
+  .file-stats { white-space: nowrap; font-size: 12px; }
+  .file-stats .plus { color: #3fb950; }
+  .file-stats .minus { color: #f85149; }
+  .excluded-table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  .excluded-table th { text-align: left; padding: 10px 16px; background: #1c2128; color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #21262d; }
+  .excluded-table td { padding: 10px 16px; border-bottom: 1px solid #21262d; font-size: 14px; }
+  .excluded-table tr:hover td { background: #1c2128; }
+  .severity { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .samples { font-size: 12px; color: #8b949e; font-family: monospace; margin-top: 4px; }
+  .section-new { border-left: 3px solid #3fb950; }
+  .section-mod { border-left: 3px solid #0d6efd; }
+  .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #21262d; color: #484f58; font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>PR #134 — Large File Support (LFS)</h1>
+<p class="subtitle">Clean branch <code>feat/lfs-core-clean</code> → <code>KafScale/platform:main</code></p>
+
+<div class="stats">
+  <div class="stat stat-blue">
+    <div class="stat-value">212</div>
+    <div class="stat-label">Files in PR</div>
+  </div>
+  <div class="stat stat-green">
+    <div class="stat-value">+37,795</div>
+    <div class="stat-label">Lines added</div>
+  </div>
+  <div class="stat stat-red">
+    <div class="stat-value">-432</div>
+    <div class="stat-label">Lines removed</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value">129</div>
+    <div class="stat-label">New files</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value">83</div>
+    <div class="stat-label">Modified files</div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="side">
+    <div class="side-label">Before (PR #128 — dirty)</div>
+    <div class="side-value bad">6,124 files &nbsp; +545,768 lines</div>
+  </div>
+  <div class="arrow">→</div>
+  <div class="side">
+    <div class="side-label">After (PR #134 — clean)</div>
+    <div class="side-value good">212 files &nbsp; +37,795 lines</div>
+  </div>
+</div>
+
+<h2>Files Included in PR</h2>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">pkg/lfs — Core LFS Library</span>
+    <span class="group-meta">
+      <span>18 files</span>
+      <span class="plus">+3,477</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/checksum.go</span>
+      <span class="file-stats"><span class="plus">+118</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/checksum_test.go</span>
+      <span class="file-stats"><span class="plus">+232</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/consumer.go</span>
+      <span class="file-stats"><span class="plus">+125</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/consumer_test.go</span>
+      <span class="file-stats"><span class="plus">+306</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/doc.go</span>
+      <span class="file-stats"><span class="plus">+232</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/envelope.go</span>
+      <span class="file-stats"><span class="plus">+72</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/envelope_test.go</span>
+      <span class="file-stats"><span class="plus">+189</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/errors.go</span>
+      <span class="file-stats"><span class="plus">+60</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/errors_test.go</span>
+      <span class="file-stats"><span class="plus">+78</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/producer.go</span>
+      <span class="file-stats"><span class="plus">+388</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/producer_test.go</span>
+      <span class="file-stats"><span class="plus">+422</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/record.go</span>
+      <span class="file-stats"><span class="plus">+286</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/record_test.go</span>
+      <span class="file-stats"><span class="plus">+412</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/resolver.go</span>
+      <span class="file-stats"><span class="plus">+93</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/resolver_test.go</span>
+      <span class="file-stats"><span class="plus">+175</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/s3client.go</span>
+      <span class="file-stats"><span class="plus">+111</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/s3client_test.go</span>
+      <span class="file-stats"><span class="plus">+151</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/lfs/s3reader.go</span>
+      <span class="file-stats"><span class="plus">+27</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">cmd/lfs-proxy — Standalone LFS Proxy</span>
+    <span class="group-meta">
+      <span>20 files</span>
+      <span class="plus">+6,166</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/backend_auth.go</span>
+      <span class="file-stats"><span class="plus">+105</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/backend_tls.go</span>
+      <span class="file-stats"><span class="plus">+68</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/handler.go</span>
+      <span class="file-stats"><span class="plus">+1120</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/handler_test.go</span>
+      <span class="file-stats"><span class="plus">+325</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/http.go</span>
+      <span class="file-stats"><span class="plus">+1013</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/http_test.go</span>
+      <span class="file-stats"><span class="plus">+274</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/http_tls.go</span>
+      <span class="file-stats"><span class="plus">+59</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/http_tls_test.go</span>
+      <span class="file-stats"><span class="plus">+39</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/main.go</span>
+      <span class="file-stats"><span class="plus">+440</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/metrics.go</span>
+      <span class="file-stats"><span class="plus">+221</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/openapi.yaml</span>
+      <span class="file-stats"><span class="plus">+433</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/record.go</span>
+      <span class="file-stats"><span class="plus">+277</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/s3.go</span>
+      <span class="file-stats"><span class="plus">+582</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/sasl_encode.go</span>
+      <span class="file-stats"><span class="plus">+77</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/sasl_encode_test.go</span>
+      <span class="file-stats"><span class="plus">+45</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/swagger.go</span>
+      <span class="file-stats"><span class="plus">+73</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/tracker.go</span>
+      <span class="file-stats"><span class="plus">+372</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/tracker_test.go</span>
+      <span class="file-stats"><span class="plus">+383</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/tracker_types.go</span>
+      <span class="file-stats"><span class="plus">+238</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/lfs-proxy/uuid.go</span>
+      <span class="file-stats"><span class="plus">+22</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">cmd/proxy/lfs_* — Unified Proxy LFS Module</span>
+    <span class="group-meta">
+      <span>15 files</span>
+      <span class="plus">+4,407</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs.go</span>
+      <span class="file-stats"><span class="plus">+503</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_backend_auth.go</span>
+      <span class="file-stats"><span class="plus">+98</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_backend_tls.go</span>
+      <span class="file-stats"><span class="plus">+68</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_http.go</span>
+      <span class="file-stats"><span class="plus">+1018</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_http_tls.go</span>
+      <span class="file-stats"><span class="plus">+59</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_metrics.go</span>
+      <span class="file-stats"><span class="plus">+221</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_record.go</span>
+      <span class="file-stats"><span class="plus">+113</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_rewrite.go</span>
+      <span class="file-stats"><span class="plus">+358</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_s3.go</span>
+      <span class="file-stats"><span class="plus">+582</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_sasl_encode.go</span>
+      <span class="file-stats"><span class="plus">+258</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_swagger.go</span>
+      <span class="file-stats"><span class="plus">+71</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_test.go</span>
+      <span class="file-stats"><span class="plus">+426</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_tracker.go</span>
+      <span class="file-stats"><span class="plus">+372</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_tracker_types.go</span>
+      <span class="file-stats"><span class="plus">+238</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/lfs_uuid.go</span>
+      <span class="file-stats"><span class="plus">+22</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">internal/console — LFS Console Integration</span>
+    <span class="group-meta">
+      <span>7 files</span>
+      <span class="plus">+1,850</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_consumer.go</span>
+      <span class="file-stats"><span class="plus">+206</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_consumer_test.go</span>
+      <span class="file-stats"><span class="plus">+167</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_handlers.go</span>
+      <span class="file-stats"><span class="plus">+491</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_handlers_test.go</span>
+      <span class="file-stats"><span class="plus">+549</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_s3_client.go</span>
+      <span class="file-stats"><span class="plus">+203</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_s3_client_test.go</span>
+      <span class="file-stats"><span class="plus">+63</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/console/lfs_types.go</span>
+      <span class="file-stats"><span class="plus">+171</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">pkg/operator — LFS Operator Resources</span>
+    <span class="group-meta">
+      <span>1 file</span>
+      <span class="plus">+366</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/operator/lfs_proxy_resources.go</span>
+      <span class="file-stats"><span class="plus">+366</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">lfs-client-sdk/java — Java SDK</span>
+    <span class="group-meta">
+      <span>16 files</span>
+      <span class="plus">+1,301</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/README.md</span>
+      <span class="file-stats"><span class="plus">+53</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/pom.xml</span>
+      <span class="file-stats"><span class="plus">+105</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/AwsS3Reader.java</span>
+      <span class="file-stats"><span class="plus">+38</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/Checksum.java</span>
+      <span class="file-stats"><span class="plus">+37</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/LfsCodec.java</span>
+      <span class="file-stats"><span class="plus">+47</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/LfsConsumer.java</span>
+      <span class="file-stats"><span class="plus">+43</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/LfsEnvelope.java</span>
+      <span class="file-stats"><span class="plus">+40</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/LfsHttpException.java</span>
+      <span class="file-stats"><span class="plus">+47</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/LfsProducer.java</span>
+      <span class="file-stats"><span class="plus">+149</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/LfsResolver.java</span>
+      <span class="file-stats"><span class="plus">+62</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/main/java/org/kafscale/lfs/S3Reader.java</span>
+      <span class="file-stats"><span class="plus">+20</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/test/java/org/kafscale/lfs/DockerAvailabilityTest.java</span>
+      <span class="file-stats"><span class="plus">+126</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/test/java/org/kafscale/lfs/LfsCodecTest.java</span>
+      <span class="file-stats"><span class="plus">+29</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/test/java/org/kafscale/lfs/LfsProducerIntegrationTest.java</span>
+      <span class="file-stats"><span class="plus">+239</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/test/java/org/kafscale/lfs/LfsProducerTest.java</span>
+      <span class="file-stats"><span class="plus">+191</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/java/src/test/java/org/kafscale/lfs/LfsResolverTest.java</span>
+      <span class="file-stats"><span class="plus">+75</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">lfs-client-sdk/python — Python SDK</span>
+    <span class="group-meta">
+      <span>7 files</span>
+      <span class="plus">+321</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/README.md</span>
+      <span class="file-stats"><span class="plus">+20</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/lfs_sdk/__init__.py</span>
+      <span class="file-stats"><span class="plus">+14</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/lfs_sdk/envelope.py</span>
+      <span class="file-stats"><span class="plus">+36</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/lfs_sdk/producer.py</span>
+      <span class="file-stats"><span class="plus">+169</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/lfs_sdk/resolver.py</span>
+      <span class="file-stats"><span class="plus">+40</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/pyproject.toml</span>
+      <span class="file-stats"><span class="plus">+36</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/python/tests/test_envelope.py</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">lfs-client-sdk/js — Node.js SDK</span>
+    <span class="group-meta">
+      <span>8 files</span>
+      <span class="plus">+4,317</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/package-lock.json</span>
+      <span class="file-stats"><span class="plus">+4170</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/package.json</span>
+      <span class="file-stats"><span class="plus">+20</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/src/__tests__/envelope.test.ts</span>
+      <span class="file-stats"><span class="plus">+8</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/src/envelope.ts</span>
+      <span class="file-stats"><span class="plus">+28</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/src/index.ts</span>
+      <span class="file-stats"><span class="plus">+3</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/src/producer.ts</span>
+      <span class="file-stats"><span class="plus">+31</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/src/resolver.ts</span>
+      <span class="file-stats"><span class="plus">+44</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js/tsconfig.json</span>
+      <span class="file-stats"><span class="plus">+13</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">lfs-client-sdk/js-browser — Browser SDK</span>
+    <span class="group-meta">
+      <span>6 files</span>
+      <span class="plus">+494</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js-browser/package.json</span>
+      <span class="file-stats"><span class="plus">+40</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js-browser/src/envelope.ts</span>
+      <span class="file-stats"><span class="plus">+54</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js-browser/src/index.ts</span>
+      <span class="file-stats"><span class="plus">+29</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js-browser/src/producer.ts</span>
+      <span class="file-stats"><span class="plus">+238</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js-browser/src/resolver.ts</span>
+      <span class="file-stats"><span class="plus">+114</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/js-browser/tsconfig.json</span>
+      <span class="file-stats"><span class="plus">+19</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">lfs-client-sdk — SDK Build</span>
+    <span class="group-meta">
+      <span>1 file</span>
+      <span class="plus">+169</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">lfs-client-sdk/Makefile</span>
+      <span class="file-stats"><span class="plus">+169</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">addons/iceberg-processor — Iceberg Addon</span>
+    <span class="group-meta">
+      <span>16 files</span>
+      <span class="plus">+996</span>
+      <span class="minus">-134</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/Dockerfile</span>
+      <span class="file-stats"><span class="plus">+11</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/Makefile</span>
+      <span class="file-stats"><span class="plus">+28</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/config/config.yaml</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/deploy/helm/iceberg-processor/config/config.yaml</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/deploy/helm/iceberg-processor/values.yaml</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/go.mod</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/go.sum</span>
+      <span class="file-stats"><span class="plus">+101</span> <span class="minus">-105</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/config/config.go</span>
+      <span class="file-stats"><span class="plus">+123</span> <span class="minus">-4</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/config/config_test.go</span>
+      <span class="file-stats"><span class="plus">+49</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/metrics/metrics.go</span>
+      <span class="file-stats"><span class="plus">+37</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/processor/lfs.go</span>
+      <span class="file-stats"><span class="plus">+218</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/processor/lfs_test.go</span>
+      <span class="file-stats"><span class="plus">+238</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/processor/processor.go</span>
+      <span class="file-stats"><span class="plus">+52</span> <span class="minus">-12</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/sink/iceberg.go</span>
+      <span class="file-stats"><span class="plus">+53</span> <span class="minus">-10</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/sink/iceberg_integration_test.go</span>
+      <span class="file-stats"><span class="plus">+65</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">addons/processors/iceberg-processor/internal/sink/sink.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">deploy/helm — Helm Charts</span>
+    <span class="group-meta">
+      <span>11 files</span>
+      <span class="plus">+1,122</span>
+      <span class="minus">-5</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/README.md</span>
+      <span class="file-stats"><span class="plus">+311</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">deploy/helm/kafscale/crds/kafscaleclusters.yaml</span>
+      <span class="file-stats"><span class="plus">+76</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">deploy/helm/kafscale/templates/console-deployment.yaml</span>
+      <span class="file-stats"><span class="plus">+36</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/templates/lfs-proxy-deployment.yaml</span>
+      <span class="file-stats"><span class="plus">+251</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/templates/lfs-proxy-http-ingress.yaml</span>
+      <span class="file-stats"><span class="plus">+57</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/templates/lfs-proxy-metrics-service.yaml</span>
+      <span class="file-stats"><span class="plus">+36</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/templates/lfs-proxy-prometheusrule.yaml</span>
+      <span class="file-stats"><span class="plus">+46</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/templates/lfs-proxy-service.yaml</span>
+      <span class="file-stats"><span class="plus">+47</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/templates/lfs-proxy-servicemonitor.yaml</span>
+      <span class="file-stats"><span class="plus">+34</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/helm/kafscale/values-lfs-demo.yaml</span>
+      <span class="file-stats"><span class="plus">+97</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">deploy/helm/kafscale/values.yaml</span>
+      <span class="file-stats"><span class="plus">+131</span> <span class="minus">-5</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">deploy/docker — Docker &amp; Compose</span>
+    <span class="group-meta">
+      <span>4 files</span>
+      <span class="plus">+711</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/docker-compose/Makefile</span>
+      <span class="file-stats"><span class="plus">+65</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/docker-compose/README.md</span>
+      <span class="file-stats"><span class="plus">+313</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/docker-compose/docker-compose.yaml</span>
+      <span class="file-stats"><span class="plus">+287</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">deploy/docker/lfs-proxy.Dockerfile</span>
+      <span class="file-stats"><span class="plus">+46</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">test/e2e — End-to-End Tests</span>
+    <span class="group-meta">
+      <span>14 files</span>
+      <span class="plus">+1,986</span>
+      <span class="minus">-6</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/README.md</span>
+      <span class="file-stats"><span class="plus">+100</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/franz_test.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/kafka_cli_test.go</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">test/e2e/lfs_iceberg_processor_test.go</span>
+      <span class="file-stats"><span class="plus">+252</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">test/e2e/lfs_proxy_broker_test.go</span>
+      <span class="file-stats"><span class="plus">+234</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">test/e2e/lfs_proxy_etcd_test.go</span>
+      <span class="file-stats"><span class="plus">+65</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">test/e2e/lfs_proxy_http_test.go</span>
+      <span class="file-stats"><span class="plus">+641</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">test/e2e/lfs_proxy_test.go</span>
+      <span class="file-stats"><span class="plus">+462</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">test/e2e/lfs_sdk_test.go</span>
+      <span class="file-stats"><span class="plus">+184</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/log_test.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/multi_segment_restart_test.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/operator_console_test.go</span>
+      <span class="file-stats"><span class="plus">+8</span> <span class="minus">-4</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/ports.go</span>
+      <span class="file-stats"><span class="plus">+33</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">test/e2e/process_group_unix.go</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">.github — CI/CD Workflows</span>
+    <span class="group-meta">
+      <span>3 files</span>
+      <span class="plus">+53</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">.github/workflows/ci.yml</span>
+      <span class="file-stats"><span class="plus">+43</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">.github/workflows/codeql.yml</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">.github/workflows/docker.yml</span>
+      <span class="file-stats"><span class="plus">+4</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">api — OpenAPI / CRD Types</span>
+    <span class="group-meta">
+      <span>2 files</span>
+      <span class="plus">+895</span>
+      <span class="minus">-4</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">api/lfs-proxy/openapi.yaml</span>
+      <span class="file-stats"><span class="plus">+688</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">api/v1alpha1/kafscalecluster_types.go</span>
+      <span class="file-stats"><span class="plus">+207</span> <span class="minus">-4</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-new">
+  <div class="group-header">
+    <span class="group-title">pkg/idoc — IDoc Explode</span>
+    <span class="group-meta">
+      <span>2 files</span>
+      <span class="plus">+505</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/idoc/explode.go</span>
+      <span class="file-stats"><span class="plus">+252</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/idoc/explode_test.go</span>
+      <span class="file-stats"><span class="plus">+253</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">ui — Console UI</span>
+    <span class="group-meta">
+      <span>4 files</span>
+      <span class="plus">+1,054</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">ui/embed_test.go</span>
+      <span class="file-stats"><span class="plus">+68</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">ui/public/app.js</span>
+      <span class="file-stats"><span class="plus">+504</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">ui/public/index.html</span>
+      <span class="file-stats"><span class="plus">+139</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">ui/public/style.css</span>
+      <span class="file-stats"><span class="plus">+343</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">hack — Build Scripts</span>
+    <span class="group-meta">
+      <span>2 files</span>
+      <span class="plus">+34</span>
+      <span class="minus">-2</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">hack/check_coverage.sh</span>
+      <span class="file-stats"><span class="plus">+16</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">hack/check_license_headers.py</span>
+      <span class="file-stats"><span class="plus">+18</span> <span class="minus">-1</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">Root / Other</span>
+    <span class="group-meta">
+      <span>15 files</span>
+      <span class="plus">+1,743</span>
+      <span class="minus">-160</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">.gitignore</span>
+      <span class="file-stats"><span class="plus">+29</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">Makefile</span>
+      <span class="file-stats"><span class="plus">+358</span> <span class="minus">-3</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">README.md</span>
+      <span class="file-stats"><span class="plus">+7</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/console/main.go</span>
+      <span class="file-stats"><span class="plus">+94</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/e2e-client/main.go</span>
+      <span class="file-stats"><span class="plus">+48</span> <span class="minus">-7</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/idoc-explode/main.go</span>
+      <span class="file-stats"><span class="plus">+283</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">go.mod</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">go.sum</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">internal/mcpserver/tools_handler_test.go</span>
+      <span class="file-stats"><span class="plus">+502</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">internal/testutil/etcd.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/acl/acl_test.go</span>
+      <span class="file-stats"><span class="plus">+162</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/cache/segment_cache_test.go</span>
+      <span class="file-stats"><span class="plus">+120</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/gen/control/broker.pb.go</span>
+      <span class="file-stats"><span class="plus">+17</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/gen/control/broker_grpc.pb.go</span>
+      <span class="file-stats"><span class="plus">+16</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/gen/metadata/metadata.pb.go</span>
+      <span class="file-stats"><span class="plus">+102</span> <span class="minus">-144</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">cmd/broker — Broker (modified)</span>
+    <span class="group-meta">
+      <span>7 files</span>
+      <span class="plus">+43</span>
+      <span class="minus">-43</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/acl_test.go</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/admin_metrics.go</span>
+      <span class="file-stats"><span class="plus">+9</span> <span class="minus">-9</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/auth_metrics.go</span>
+      <span class="file-stats"><span class="plus">+4</span> <span class="minus">-4</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/lag_metrics.go</span>
+      <span class="file-stats"><span class="plus">+3</span> <span class="minus">-3</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/main.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/metrics_histogram.go</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-6</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/broker/runtime_metrics.go</span>
+      <span class="file-stats"><span class="plus">+18</span> <span class="minus">-18</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">cmd/proxy — Unified Proxy (modified)</span>
+    <span class="group-meta">
+      <span>2 files</span>
+      <span class="plus">+482</span>
+      <span class="minus">-1</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">cmd/proxy/main.go</span>
+      <span class="file-stats"><span class="plus">+49</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">cmd/proxy/openapi.yaml</span>
+      <span class="file-stats"><span class="plus">+433</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">internal/console — Console (modified)</span>
+    <span class="group-meta">
+      <span>4 files</span>
+      <span class="plus">+822</span>
+      <span class="minus">-18</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">internal/console/metrics_client.go</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">internal/console/metrics_client_test.go</span>
+      <span class="file-stats"><span class="plus">+208</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">internal/console/server.go</span>
+      <span class="file-stats"><span class="plus">+19</span> <span class="minus">-8</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">internal/console/server_test.go</span>
+      <span class="file-stats"><span class="plus">+593</span> <span class="minus">-8</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">pkg/broker — Broker Package (modified)</span>
+    <span class="group-meta">
+      <span>5 files</span>
+      <span class="plus">+547</span>
+      <span class="minus">-13</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/broker/conn_context_test.go</span>
+      <span class="file-stats"><span class="plus">+69</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/broker/proxyproto_test.go</span>
+      <span class="file-stats"><span class="plus">+205</span> <span class="minus">-4</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/broker/s3_health_test.go</span>
+      <span class="file-stats"><span class="plus">+57</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/broker/server.go</span>
+      <span class="file-stats"><span class="plus">+22</span> <span class="minus">-5</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/broker/server_test.go</span>
+      <span class="file-stats"><span class="plus">+194</span> <span class="minus">-4</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">pkg/metadata — Metadata (modified)</span>
+    <span class="group-meta">
+      <span>8 files</span>
+      <span class="plus">+924</span>
+      <span class="minus">-14</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/etcd_store.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-3</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/etcd_store_test.go</span>
+      <span class="file-stats"><span class="plus">+121</span> <span class="minus">-3</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/group_lease_test.go</span>
+      <span class="file-stats"><span class="plus">+34</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/group_router_test.go</span>
+      <span class="file-stats"><span class="plus">+34</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/lease_manager.go</span>
+      <span class="file-stats"><span class="plus">+3</span> <span class="minus">-3</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/partition_lease_test.go</span>
+      <span class="file-stats"><span class="plus">+68</span> <span class="minus">-3</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/partition_router_test.go</span>
+      <span class="file-stats"><span class="plus">+31</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/metadata/store_test.go</span>
+      <span class="file-stats"><span class="plus">+632</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">pkg/operator — Operator (modified)</span>
+    <span class="group-meta">
+      <span>5 files</span>
+      <span class="plus">+1,860</span>
+      <span class="minus">-5</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/operator/cluster_controller.go</span>
+      <span class="file-stats"><span class="plus">+6</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/operator/cluster_controller_test.go</span>
+      <span class="file-stats"><span class="plus">+128</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/operator/etcd_resources.go</span>
+      <span class="file-stats"><span class="plus">+2</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/operator/helpers_test.go</span>
+      <span class="file-stats"><span class="plus">+1721</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/operator/snapshot.go</span>
+      <span class="file-stats"><span class="plus">+3</span> <span class="minus">-1</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">pkg/protocol — Protocol (modified)</span>
+    <span class="group-meta">
+      <span>3 files</span>
+      <span class="plus">+487</span>
+      <span class="minus">-0</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#28a74520;color:#28a745">NEW</span>
+      <span class="file-path">pkg/protocol/encoding_test.go</span>
+      <span class="file-stats"><span class="plus">+359</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/protocol/request_test.go</span>
+      <span class="file-stats"><span class="plus">+127</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/protocol/types.go</span>
+      <span class="file-stats"><span class="plus">+1</span> <span class="minus">-0</span></span>
+    </div>
+  </div>
+</div>
+
+<div class="group section-mod">
+  <div class="group-header">
+    <span class="group-title">pkg/storage — Storage (modified)</span>
+    <span class="group-meta">
+      <span>6 files</span>
+      <span class="plus">+663</span>
+      <span class="minus">-27</span>
+    </span>
+  </div>
+  <div class="group-files">
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/storage/buffer_test.go</span>
+      <span class="file-stats"><span class="plus">+51</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/storage/index_test.go</span>
+      <span class="file-stats"><span class="plus">+77</span> <span class="minus">-1</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/storage/log_test.go</span>
+      <span class="file-stats"><span class="plus">+260</span> <span class="minus">-2</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/storage/s3_aws.go</span>
+      <span class="file-stats"><span class="plus">+5</span> <span class="minus">-16</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/storage/s3client_test.go</span>
+      <span class="file-stats"><span class="plus">+262</span> <span class="minus">-0</span></span>
+    </div>
+    <div class="file-row">
+      <span class="badge" style="background:#0d6efd20;color:#0d6efd">MOD</span>
+      <span class="file-path">pkg/storage/segment.go</span>
+      <span class="file-stats"><span class="plus">+8</span> <span class="minus">-8</span></span>
+    </div>
+  </div>
+</div>
+
+<h2>Files Excluded (5,912 removed)</h2>
+<p style="color:#8b949e;margin-bottom:16px;">These files exist in <code>lfs-core</code> but are NOT in the clean PR. They stay in <code>lfs-core</code> for your local use.</p>
+
+<table class="excluded-table">
+<thead>
+  <tr><th>Category</th><th>Count</th><th>Severity</th><th>Reason</th><th>Examples</th></tr>
+</thead>
+<tbody>
+  <tr>
+    <td><strong>node_modules/</strong></td>
+    <td style="text-align:right;font-weight:700">5,700</td>
+    <td><span class="severity" style="background:#dc354520;color:#dc3545">CRITICAL</span></td>
+    <td>Third-party npm dependencies — never commit these</td>
+    <td class="samples">lfs-client-sdk/js/node_modules/@aws-crypto/sha1-browser/node_modules/@smithy/util-utf8/dist-cjs/fromUtf8.browser.js<br>lfs-client-sdk/js/node_modules/@aws-crypto/sha1-browser/node_modules/@smithy/util-utf8/dist-cjs/fromUtf8.js<br>lfs-client-sdk/js/node_modules/@aws-crypto/sha1-browser/node_modules/@smithy/util-utf8/dist-cjs/index.js<br><em>… and 5,697 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Java target/</strong></td>
+    <td style="text-align:right;font-weight:700">33</td>
+    <td><span class="severity" style="background:#dc354520;color:#dc3545">CRITICAL</span></td>
+    <td>Maven build output</td>
+    <td class="samples">examples/E10_java-kafka-client-demo/target/classes/com/example/kafscale/SimpleDemo$Config.class<br>examples/E10_java-kafka-client-demo/target/classes/com/example/kafscale/SimpleDemo.class<br>examples/E20_spring-boot-kafscale-demo/target/classes/application.yml<br><em>… and 30 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>JS dist/</strong></td>
+    <td style="text-align:right;font-weight:700">12</td>
+    <td><span class="severity" style="background:#dc354520;color:#dc3545">CRITICAL</span></td>
+    <td>Compiled JavaScript output</td>
+    <td class="samples">lfs-client-sdk/js/dist/__tests__/envelope.test.d.ts<br>lfs-client-sdk/js/dist/__tests__/envelope.test.js<br>lfs-client-sdk/js/dist/envelope.d.ts<br><em>… and 9 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Python egg-info/</strong></td>
+    <td style="text-align:right;font-weight:700">5</td>
+    <td><span class="severity" style="background:#dc354520;color:#dc3545">CRITICAL</span></td>
+    <td>Python package metadata</td>
+    <td class="samples">lfs-client-sdk/python/kafscale_lfs_sdk.egg-info/PKG-INFO<br>lfs-client-sdk/python/kafscale_lfs_sdk.egg-info/SOURCES.txt<br>lfs-client-sdk/python/kafscale_lfs_sdk.egg-info/dependency_links.txt<br><em>… and 2 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Python __pycache__/</strong></td>
+    <td style="text-align:right;font-weight:700">5</td>
+    <td><span class="severity" style="background:#dc354520;color:#dc3545">CRITICAL</span></td>
+    <td>Python bytecode cache</td>
+    <td class="samples">lfs-client-sdk/python/lfs_sdk/__pycache__/__init__.cpython-312.pyc<br>lfs-client-sdk/python/lfs_sdk/__pycache__/envelope.cpython-312.pyc<br>lfs-client-sdk/python/lfs_sdk/__pycache__/producer.cpython-312.pyc<br><em>… and 2 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Personal examples</strong></td>
+    <td style="text-align:right;font-weight:700">27</td>
+    <td><span class="severity" style="background:#fd7e1420;color:#fd7e14">HIGH</span></td>
+    <td>Personal workflow docs — not project code</td>
+    <td class="samples">examples/agents/blog-draft-agent.md<br>examples/agents/channel-draft-generator.md<br>examples/agents/claims-drift-sentinel.md<br><em>… and 24 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>PID files (.pf/)</strong></td>
+    <td style="text-align:right;font-weight:700">6</td>
+    <td><span class="severity" style="background:#fd7e1420;color:#fd7e14">HIGH</span></td>
+    <td>Local process PID files</td>
+    <td class="samples">lfs-client-sdk/.pf/broker.pid<br>lfs-client-sdk/.pf/lfs_http.pid<br>lfs-client-sdk/.pf/minio.pid<br><em>… and 3 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Synology configs</strong></td>
+    <td style="text-align:right;font-weight:700">3</td>
+    <td><span class="severity" style="background:#fd7e1420;color:#fd7e14">HIGH</span></td>
+    <td>Private NAS/S3 infrastructure</td>
+    <td class="samples">deploy/synology-s3/.env.example<br>deploy/synology-s3/README.md<br>deploy/synology-s3/docker-compose.yaml</td>
+  </tr>
+  <tr>
+    <td><strong>Claude config</strong></td>
+    <td style="text-align:right;font-weight:700">1</td>
+    <td><span class="severity" style="background:#fd7e1420;color:#fd7e14">HIGH</span></td>
+    <td>Personal AI assistant config</td>
+    <td class="samples">.claude/commands/review.md</td>
+  </tr>
+  <tr>
+    <td><strong>Misc artifacts</strong></td>
+    <td style="text-align:right;font-weight:700">4</td>
+    <td><span class="severity" style="background:#ffc10720;color:#ffc107">MEDIUM</span></td>
+    <td>Build artifacts or temp files</td>
+    <td class="samples">Makefile-MK<br>e2e-client<br>lfs-proxy<br><em>… and 1 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Deploy templates</strong></td>
+    <td style="text-align:right;font-weight:700">4</td>
+    <td><span class="severity" style="background:#ffc10720;color:#ffc107">MEDIUM</span></td>
+    <td>Deployment docs/scripts — separate PR</td>
+    <td class="samples">deploy/DEPLOYMENT.md<br>deploy/templates/README.md<br>deploy/templates/shell/start-kafscale.sh<br><em>… and 1 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>systemd units</strong></td>
+    <td style="text-align:right;font-weight:700">4</td>
+    <td><span class="severity" style="background:#ffc10720;color:#ffc107">MEDIUM</span></td>
+    <td>Not applicable — project uses Kubernetes</td>
+    <td class="samples">deploy/templates/systemd/kafscale-broker.service<br>deploy/templates/systemd/kafscale-console.service<br>deploy/templates/systemd/kafscale-etcd.service<br><em>… and 1 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Testcontainers config</strong></td>
+    <td style="text-align:right;font-weight:700">2</td>
+    <td><span class="severity" style="background:#ffc10720;color:#ffc107">MEDIUM</span></td>
+    <td>Local test config</td>
+    <td class="samples">lfs-client-sdk/java/.testcontainers.properties<br>lfs-client-sdk/java/src/test/resources/.testcontainers.properties</td>
+  </tr>
+  <tr>
+    <td><strong>Examples</strong></td>
+    <td style="text-align:right;font-weight:700">66</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Example projects — separate PR</td>
+    <td class="samples">examples/101_kafscale-dev-guide/01-introduction.md<br>examples/101_kafscale-dev-guide/02-quick-start.md<br>examples/101_kafscale-dev-guide/03-spring-boot-configuration.md<br><em>… and 63 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Documentation</strong></td>
+    <td style="text-align:right;font-weight:700">14</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Docs go in a separate PR / gh-pages branch</td>
+    <td class="samples">docs/lfs-proxy/OWASP-Hardening-Report.md<br>docs/lfs-proxy/README.md<br>docs/lfs-proxy/blob-transformer-proposal.md<br><em>… and 11 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Demo manifests</strong></td>
+    <td style="text-align:right;font-weight:700">9</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Demo K8s manifests — separate PR</td>
+    <td class="samples">deploy/demo/flink-wordcount-app.yaml<br>deploy/demo/kafka-client-pod.yaml<br>deploy/demo/kafscale-cluster.yaml<br><em>… and 6 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Shell scripts</strong></td>
+    <td style="text-align:right;font-weight:700">8</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Demo/utility scripts — separate PR</td>
+    <td class="samples">scripts/e72-browser-demo.sh<br>scripts/idoc-explode-demo.sh<br>scripts/industrial-lfs-demo.sh<br><em>… and 5 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Demo templates</strong></td>
+    <td style="text-align:right;font-weight:700">4</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Demo Helm resources — separate PR</td>
+    <td class="samples">deploy/helm/kafscale/templates/lfs-demos-e72-configmap.yaml<br>deploy/helm/kafscale/templates/lfs-demos-e72-deployment.yaml<br>deploy/helm/kafscale/templates/lfs-demos-e72-ingress.yaml<br><em>… and 1 more</em></td>
+  </tr>
+  <tr>
+    <td><strong>Release workflow</strong></td>
+    <td style="text-align:right;font-weight:700">1</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Release pipeline — separate PR</td>
+    <td class="samples">.github/workflows/stage-release.yml</td>
+  </tr>
+  <tr>
+    <td><strong>User guide</strong></td>
+    <td style="text-align:right;font-weight:700">1</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Documentation — separate PR</td>
+    <td class="samples">addons/processors/iceberg-processor/user-guide.md</td>
+  </tr>
+  <tr>
+    <td><strong>Env template</strong></td>
+    <td style="text-align:right;font-weight:700">1</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Deployment config template</td>
+    <td class="samples">deploy/templates/kafscale.env.template</td>
+  </tr>
+  <tr>
+    <td><strong>Doc tools</strong></td>
+    <td style="text-align:right;font-weight:700">1</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Documentation tooling</td>
+    <td class="samples">hack/compare_docs.py</td>
+  </tr>
+  <tr>
+    <td><strong>Other</strong></td>
+    <td style="text-align:right;font-weight:700">1</td>
+    <td><span class="severity" style="background:#6c757d20;color:#6c757d">INFO</span></td>
+    <td>Uncategorized</td>
+    <td class="samples">lfs-client-sdk/java/docs/integration-tests.md</td>
+  </tr>
+</tbody>
+</table>
+
+<div class="footer">
+  Generated for PR review — 212 files included, 5,912 excluded<br>
+  Branch: feat/lfs-core-clean → KafScale/platform:main
+</div>
+
+</body>
+</html>
