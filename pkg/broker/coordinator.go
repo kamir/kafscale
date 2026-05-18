@@ -19,7 +19,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -30,9 +32,44 @@ import (
 	"github.com/KafScale/platform/pkg/protocol"
 )
 
+// rebalanceDebug, when KAFSCALE_GROUP_DEBUG=1, emits a one-line trace
+// every time the coordinator returns REBALANCE_IN_PROGRESS so we can
+// see which RPC layer kafka-go is looping in. Toggled by env so the
+// production path stays silent. Gating is checked once at init.
+var rebalanceDebug = os.Getenv("KAFSCALE_GROUP_DEBUG") == "1"
+
+func logRebalance(handler, groupID, memberID string, generation int32, state groupPhase, reason string) {
+	if !rebalanceDebug {
+		return
+	}
+	log.Printf("group=%s handler=%s member=%s gen=%d state=%s -> REBALANCE_IN_PROGRESS (%s)",
+		groupID, handler, memberID, generation, groupPhaseString(state), reason)
+}
+
 const (
 	defaultSessionTimeout   = 30 * time.Second
 	defaultRebalanceTimeout = 30 * time.Second
+
+	// rebalanceLaggerGrace is how long a member can fail to refresh
+	// (via Heartbeat or a fresh JoinGroup at the current generation)
+	// during an in-flight rebalance before it is considered dead and
+	// dropped. Without this, an abandoned connection (kafka-go client
+	// that opened a fresh Reader after an error) holds the rebalance
+	// hostage for the full rebalanceDeadline (30s) — and if new
+	// Readers spawn faster than that, the rebalance never settles
+	// (see PLAN-01 P22.6). Kept short relative to defaultSessionTimeout
+	// so live members are never mistakenly dropped.
+	rebalanceLaggerGrace = 3 * time.Second
+
+	// leaderActionGrace is how long the broker waits for the elected
+	// leader to call SyncGroup after the state transitioned to
+	// completing_rebalance. If the leader hasn't acted within this
+	// window, the broker assumes the leader's connection is dead
+	// (kafka-go's pattern is to abandon a Reader after a single
+	// REBALANCE_IN_PROGRESS and create a new one with a fresh
+	// memberID), and picks a new leader from the surviving members
+	// so the rebalance can close. PLAN-01 P22.6.
+	leaderActionGrace = 2 * time.Second
 )
 
 type groupPhase int
@@ -82,6 +119,15 @@ type groupState struct {
 
 	rebalanceTimeout  time.Duration
 	rebalanceDeadline time.Time
+
+	// completingSince is when the state most recently transitioned to
+	// groupStateCompletingRebalance. Used by the P22.6 leader re-election
+	// path: if the leader hasn't called SyncGroup within
+	// leaderActionGrace, we evict it and pick a new one — kafka-go can
+	// abandon a Reader instance after a single REBALANCE_IN_PROGRESS,
+	// leaving the broker holding a "leader" that will never call
+	// SyncGroup. Without re-election the rebalance can't close.
+	completingSince time.Time
 }
 
 type memberState struct {
@@ -173,6 +219,29 @@ func (c *GroupCoordinator) JoinGroup(ctx context.Context, req *protocol.JoinGrou
 		state.ensureLeader()
 	}
 
+	// Evict ghost members from earlier generations whose connection was
+	// abandoned by the client (kafka-go opens a fresh Reader on error;
+	// the old memberID is orphaned). Without this, an actively-joining
+	// new member is forced to wait for the full rebalance deadline
+	// (30s) before completeIfReady can succeed, and a stream of new
+	// kafka-go Readers prevents the group from ever settling.
+	// See PLAN-01 P22.6.
+	now := time.Now()
+	if state.dropRebalanceLaggers(now) {
+		state.ensureLeader()
+	}
+	// P22.6: re-elect the leader if it has held the group in
+	// completing_rebalance without calling SyncGroup. kafka-go
+	// commonly abandons a Reader after a single
+	// REBALANCE_IN_PROGRESS — the memberID is still inside its
+	// session timeout but the socket is dead, so SyncGroup never
+	// arrives. Without re-election the group is permanently stuck.
+	if state.reelectLeaderIfStale(now) {
+		// Re-elected leader needs a chance to ack via JoinGroup; the
+		// current call is from a member that just joined, so we treat
+		// the group as still rebalancing rather than ready.
+	}
+
 	ready := state.state == groupStateStable || state.state == groupStateCompletingRebalance
 	if !ready {
 		ready = state.completeIfReady()
@@ -197,6 +266,12 @@ func (c *GroupCoordinator) JoinGroup(ctx context.Context, req *protocol.JoinGrou
 	}
 	if ready {
 		resp.ErrorCode = protocol.NONE
+		if rebalanceDebug {
+			log.Printf("group=%s handler=JoinGroup member=%s gen=%d state=%s -> OK (leader=%s, %d members)",
+				req.GroupID, memberID, state.generationID, groupPhaseString(state.state), state.leaderID, len(state.members))
+		}
+	} else {
+		logRebalance("JoinGroup", req.GroupID, memberID, state.generationID, state.state, "not ready after completeIfReady")
 	}
 	if err := c.persistGroupLocked(ctx, req.GroupID, state); err != nil {
 		resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
@@ -237,6 +312,7 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 		}, nil
 	}
 	if state.state == groupStatePreparingRebalance {
+		logRebalance("SyncGroup", req.GroupID, req.MemberID, state.generationID, state.state, "still preparing")
 		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
@@ -247,19 +323,47 @@ func (c *GroupCoordinator) SyncGroup(ctx context.Context, req *protocol.SyncGrou
 
 	if state.state == groupStateCompletingRebalance && len(state.assignments) == 0 {
 		if req.MemberID != state.leaderID {
-			c.mu.Unlock()
-			return &protocol.SyncGroupResponse{
-				CorrelationID: correlationID,
-				ThrottleMs:    0,
-				ErrorCode:     protocol.REBALANCE_IN_PROGRESS,
-			}, nil
+			// P22.6: every non-leader poll is a chance to detect that
+			// the leader has gone dark. If the leader hasn't acted
+			// within leaderActionGrace, kick it and promote the
+			// caller (the most-recent active member) instead.
+			if state.reelectLeaderIfStale(time.Now()) && req.MemberID == state.leaderID {
+				if rebalanceDebug {
+					log.Printf("group=%s handler=SyncGroup member=%s gen=%d -> promoted to leader after stale leader dropped",
+						req.GroupID, req.MemberID, state.generationID)
+				}
+				// fall through to the leader path below
+			} else {
+				logRebalance("SyncGroup", req.GroupID, req.MemberID, state.generationID, state.state, fmt.Sprintf("non-leader awaiting leader sync (leader=%s)", state.leaderID))
+				c.mu.Unlock()
+				return &protocol.SyncGroupResponse{
+					CorrelationID: correlationID,
+					ThrottleMs:    0,
+					ErrorCode:     protocol.REBALANCE_IN_PROGRESS,
+				}, nil
+			}
+		}
+		if rebalanceDebug {
+			log.Printf("group=%s handler=SyncGroup member=%s gen=%d state=%s -> LEADER sync, computing assignments for %d members",
+				req.GroupID, req.MemberID, state.generationID, groupPhaseString(state.state), len(state.members))
 		}
 		state.assignments = c.assignPartitions(ctx, state)
 		state.markStable()
+		if rebalanceDebug {
+			assignedTo := 0
+			for _, a := range state.assignments {
+				if len(a) > 0 {
+					assignedTo++
+				}
+			}
+			log.Printf("group=%s handler=SyncGroup member=%s gen=%d -> LEADER sync done; %d members assigned out of %d; state=%s",
+				req.GroupID, req.MemberID, state.generationID, assignedTo, len(state.members), groupPhaseString(state.state))
+		}
 	}
 
 	assignments := state.assignments[req.MemberID]
 	if assignments == nil && state.state != groupStateStable {
+		logRebalance("SyncGroup", req.GroupID, req.MemberID, state.generationID, state.state, "no assignments and not stable")
 		c.mu.Unlock()
 		return &protocol.SyncGroupResponse{
 			CorrelationID: correlationID,
@@ -330,6 +434,7 @@ func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *protocol.Heartbea
 		}
 	}
 	if state.state != groupStateStable {
+		logRebalance("Heartbeat", req.GroupID, req.MemberID, state.generationID, state.state, "state not stable")
 		c.mu.Unlock()
 		return &protocol.HeartbeatResponse{
 			CorrelationID: correlationID,
@@ -415,10 +520,19 @@ func (c *GroupCoordinator) OffsetCommit(ctx context.Context, req *protocol.Offse
 	groupErr := int16(protocol.NONE)
 	if state == nil {
 		groupErr = protocol.UNKNOWN_MEMBER_ID
+		if rebalanceDebug {
+			log.Printf("group=%s handler=OffsetCommit member=%s gen=%d -> UNKNOWN_MEMBER_ID (state nil)", req.GroupID, req.MemberID, req.GenerationID)
+		}
 	} else if _, ok := state.members[req.MemberID]; !ok {
 		groupErr = protocol.UNKNOWN_MEMBER_ID
+		if rebalanceDebug {
+			log.Printf("group=%s handler=OffsetCommit member=%s gen=%d -> UNKNOWN_MEMBER_ID (member not in state)", req.GroupID, req.MemberID, req.GenerationID)
+		}
 	} else if req.GenerationID != state.generationID {
 		groupErr = protocol.ILLEGAL_GENERATION
+		if rebalanceDebug {
+			log.Printf("group=%s handler=OffsetCommit member=%s req_gen=%d state_gen=%d -> ILLEGAL_GENERATION", req.GroupID, req.MemberID, req.GenerationID, state.generationID)
+		}
 	}
 	c.mu.Unlock()
 
@@ -1145,6 +1259,9 @@ func (s *groupState) completeIfReady() bool {
 			return false
 		}
 	}
+	if s.state != groupStateCompletingRebalance {
+		s.completingSince = time.Now()
+	}
 	s.state = groupStateCompletingRebalance
 	s.rebalanceDeadline = time.Time{}
 	return true
@@ -1154,7 +1271,39 @@ func (s *groupState) markStable() {
 	if s.state != groupStateDead {
 		s.state = groupStateStable
 		s.rebalanceDeadline = time.Time{}
+		s.completingSince = time.Time{}
 	}
+}
+
+// reelectLeaderIfStale drops and re-elects the leader if the group has
+// been stuck in completing_rebalance longer than leaderActionGrace
+// without the leader calling SyncGroup. This addresses the P22.6
+// failure mode where kafka-go-based clients abandon a Reader (and its
+// memberID) after a single REBALANCE_IN_PROGRESS response — the
+// memberID lives on in state.members (it's still inside its session
+// timeout window), is still recognised as the leader, but its socket
+// is dead and SyncGroup is never sent. Without re-election the group
+// can never close the rebalance. Returns true if the leader was
+// changed.
+func (s *groupState) reelectLeaderIfStale(now time.Time) bool {
+	if s.state != groupStateCompletingRebalance {
+		return false
+	}
+	if s.completingSince.IsZero() || now.Sub(s.completingSince) < leaderActionGrace {
+		return false
+	}
+	prev := s.leaderID
+	delete(s.members, prev)
+	delete(s.assignments, prev)
+	s.leaderID = ""
+	s.ensureLeader()
+	// Reset the timer for the new leader.
+	s.completingSince = now
+	if rebalanceDebug {
+		log.Printf("reelectLeaderIfStale: dropped stale leader=%s, new leader=%s, members=%d",
+			prev, s.leaderID, len(s.members))
+	}
+	return true
 }
 
 func (s *groupState) removeExpiredMembers(now time.Time) bool {
@@ -1179,20 +1328,55 @@ func (s *groupState) removeExpiredMembers(now time.Time) bool {
 	return changed
 }
 
+// dropRebalanceLaggers drops members that are holding up a rebalance.
+//
+// Two trigger conditions:
+//   - the rebalanceDeadline has fully elapsed (the original behaviour;
+//     hard cutoff for groups whose deadline came and went)
+//   - the rebalance is in progress AND a member at a stale
+//     joinGeneration hasn't refreshed within rebalanceLaggerGrace.
+//     This is the P22.6 fast-path: kafka-go clients that abandon a
+//     connection after an error and open a fresh Reader leave behind
+//     "ghost" memberIDs that will never rejoin at the new generation.
+//     Holding the rebalance open for the full 30s deadline lets new
+//     ghosts pile up faster than old ones expire and the group never
+//     settles.
 func (s *groupState) dropRebalanceLaggers(now time.Time) bool {
-	if s.rebalanceDeadline.IsZero() || now.Before(s.rebalanceDeadline) {
+	deadlineExpired := !s.rebalanceDeadline.IsZero() && !now.Before(s.rebalanceDeadline)
+	inRebalance := s.state == groupStatePreparingRebalance || s.state == groupStateCompletingRebalance
+	if !deadlineExpired && !inRebalance {
 		return false
 	}
 	changed := false
+	considered := 0
+	dropped := 0
+	skippedCurrent := 0
+	skippedFresh := 0
 	for memberID, member := range s.members {
-		if member.joinGeneration != s.generationID {
-			delete(s.members, memberID)
-			delete(s.assignments, memberID)
-			if s.leaderID == memberID {
-				s.leaderID = ""
-			}
-			changed = true
+		considered++
+		if member.joinGeneration == s.generationID {
+			skippedCurrent++
+			continue
 		}
+		// At a stale generation. Drop if either the hard deadline has
+		// passed, or the member hasn't been seen recently — the latter
+		// is the P22.6 fast-path.
+		stale := !member.lastHeartbeat.IsZero() && now.Sub(member.lastHeartbeat) > rebalanceLaggerGrace
+		if !deadlineExpired && !stale {
+			skippedFresh++
+			continue
+		}
+		delete(s.members, memberID)
+		delete(s.assignments, memberID)
+		if s.leaderID == memberID {
+			s.leaderID = ""
+		}
+		changed = true
+		dropped++
+	}
+	if rebalanceDebug && considered > 0 {
+		log.Printf("dropRebalanceLaggers: considered=%d dropped=%d skipped_current=%d skipped_fresh=%d deadlineExpired=%v inRebalance=%v",
+			considered, dropped, skippedCurrent, skippedFresh, deadlineExpired, inRebalance)
 	}
 	if len(s.members) == 0 {
 		s.state = groupStateEmpty
