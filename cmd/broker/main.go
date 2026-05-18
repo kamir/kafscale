@@ -1719,7 +1719,20 @@ func (h *handler) handleListOffsets(ctx context.Context, header *protocol.Reques
 }
 
 func (h *handler) handleFetch(ctx context.Context, header *protocol.RequestHeader, req *protocol.FetchRequest) ([]byte, error) {
-	if header.APIVersion < 11 || header.APIVersion > 13 {
+	// Accept v1–v13. Both pkg/protocol's request parser and response encoder
+	// already gate version-introduced fields correctly (RackID added in v11,
+	// PreferredReadReplica in v11, TopicID/flexible in v12, etc.) — see
+	// EncodeFetchResponse in pkg/protocol/response.go and the
+	// `case APIKeyFetch:` block in pkg/protocol/request.go. The handler's
+	// own logic is version-agnostic: it uses topic.Name (set for v0–v11)
+	// or topic.TopicID (v12+) interchangeably via idToName lookup.
+	//
+	// Why widen: kafka-go (KafClaw's consumer-group client) negotiates
+	// Fetch at v10 against the brokers it connects to today. Previously
+	// the broker rejected v10 → consumer can't read partitions → endless
+	// consumer-group rebalance loop. Closes meta PLAN-01 P22.4 (the next
+	// layer beyond P22.3's OffsetFetch widening).
+	if header.APIVersion < 1 || header.APIVersion > 13 {
 		return nil, fmt.Errorf("fetch version %d not supported", header.APIVersion)
 	}
 	topicResponses := make([]protocol.FetchTopicResponse, 0, len(req.Topics))
@@ -2642,7 +2655,11 @@ func generateApiVersions() []protocol.ApiVersion {
 		{key: protocol.APIKeyApiVersion, minVersion: 0, maxVersion: 4},
 		{key: protocol.APIKeyMetadata, minVersion: 0, maxVersion: 12},
 		{key: protocol.APIKeyProduce, minVersion: 0, maxVersion: 9},
-		{key: protocol.APIKeyFetch, minVersion: 11, maxVersion: 13},
+		// Fetch widened to v1–v13: the handler is version-agnostic and the
+		// pkg/protocol encoder/parser cover the full range. Necessary for
+		// kafka-go clients that negotiate at v10 (Kafka 2.3-era).
+		// See PLAN-01 P22.4.
+		{key: protocol.APIKeyFetch, minVersion: 1, maxVersion: 13},
 		{key: protocol.APIKeyFindCoordinator, minVersion: 3, maxVersion: 3},
 		{key: protocol.APIKeyListOffsets, minVersion: 0, maxVersion: 4},
 		{key: protocol.APIKeyJoinGroup, minVersion: 4, maxVersion: 4},
