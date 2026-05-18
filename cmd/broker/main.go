@@ -2660,12 +2660,48 @@ func generateApiVersions() []protocol.ApiVersion {
 		// kafka-go clients that negotiate at v10 (Kafka 2.3-era).
 		// See PLAN-01 P22.4.
 		{key: protocol.APIKeyFetch, minVersion: 1, maxVersion: 13},
-		{key: protocol.APIKeyFindCoordinator, minVersion: 3, maxVersion: 3},
+		// Consumer-group APIs widened to match what the encoder/decoder
+		// actually support (verified pkg/protocol/{request,response}.go,
+		// 2026-05-18, PLAN-01 P22.5). Without this widening, kafka-go's
+		// version-negotiation logic for the consumer-group state machine
+		// (JoinGroup → SyncGroup → Heartbeat) could never agree on a
+		// single version pair with the broker, producing a perpetual
+		// rebalance loop after the P22.3/P22.4 fixes lifted the
+		// per-request rejections.
+		//
+		// FindCoordinator: encoder gates `version >= 4` (supports v0–v3),
+		// decoder reads keyType only at v1+ (supports v0–v4). v0–v3 is
+		// the safe intersection.
+		{key: protocol.APIKeyFindCoordinator, minVersion: 0, maxVersion: 3},
 		{key: protocol.APIKeyListOffsets, minVersion: 0, maxVersion: 4},
-		{key: protocol.APIKeyJoinGroup, minVersion: 4, maxVersion: 4},
-		{key: protocol.APIKeySyncGroup, minVersion: 4, maxVersion: 4},
-		{key: protocol.APIKeyHeartbeat, minVersion: 4, maxVersion: 4},
-		{key: protocol.APIKeyLeaveGroup, minVersion: 4, maxVersion: 4},
+		// JoinGroup: encoder supports v0–v5, but the decoder in
+		// pkg/protocol/request.go does NOT read GroupInstanceID
+		// (introduced at v5, nullable string between MemberID and
+		// ProtocolType). Advertising v5 makes a kafka-go client send
+		// the v5 wire format; the decoder then misreads the
+		// GroupInstanceID null marker (-1 as int16) as the length of
+		// ProtocolType — verified empirically with
+		// `parse request: invalid string length: -1` errors after the
+		// first widening attempt. Cap at v4 until the decoder is
+		// updated to handle GroupInstanceID; tracked as P22.7.
+		{key: protocol.APIKeyJoinGroup, minVersion: 1, maxVersion: 4},
+		// SyncGroup: encoder v0–v5, decoder reads GroupInstanceID at
+		// v3+ and ProtocolType/ProtocolName at v5+. Safe full range.
+		{key: protocol.APIKeySyncGroup, minVersion: 1, maxVersion: 5},
+		// Heartbeat: encoder gates at v4, decoder handles v0–v4 incl.
+		// flexible at v4. instanceID only read at v3+.
+		{key: protocol.APIKeyHeartbeat, minVersion: 1, maxVersion: 4},
+		// LeaveGroup: the decoder only knows the v0–v2 single-member
+		// shape (GroupID + MemberID). v3+ introduced a members[] array;
+		// advertising v4 here previously was a lie — kafka-go would send
+		// v4 wire format and the decoder would misparse it as a single
+		// string. Narrow to what we actually implement.
+		{key: protocol.APIKeyLeaveGroup, minVersion: 0, maxVersion: 2},
+		// OffsetCommit: NOT widened in P22.5. Decoder is hardcoded to
+		// `version != 3 → error` and the encoder is hardcoded to the v3
+		// shape (always writes ThrottleMs). Widening here without first
+		// generalising both ends would just push the rejection one layer
+		// deeper. Tracked separately for P22.6.
 		{key: protocol.APIKeyOffsetCommit, minVersion: 3, maxVersion: 3},
 		// OffsetFetch widened to v1–v5: the encoder accepts the entire
 		// range, and clients on older kafka-go/librdkafka (Kafka 0.11–1.x

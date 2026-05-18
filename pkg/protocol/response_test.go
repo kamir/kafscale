@@ -1566,6 +1566,118 @@ func TestEncodeOffsetFetchResponse_VersionRange(t *testing.T) {
 	}
 }
 
+// TestConsumerGroupEncoders_VersionRange_P22_5 verifies every encoder
+// in the consumer-group state machine accepts every version inside the
+// range the broker now advertises in cmd/broker/main.go::generateApiVersions
+// and rejects the boundaries outside it.
+//
+// Regression coverage for PLAN-01 P22.5: after P22.3 (OffsetFetch) and
+// P22.4 (Fetch) lifted the per-request rejections, kafclaw's kafka-go
+// client still couldn't settle a consumer-group rebalance because the
+// APIVersions advertisement for JoinGroup/SyncGroup/Heartbeat/
+// LeaveGroup/FindCoordinator pinned each to a single version, leaving
+// the negotiator no usable pairing across the four-API handshake. The
+// advertisement was widened to what the encoders actually support; this
+// test pins that contract so any future encoder change that narrows
+// support fails CI rather than silently re-introducing the rebalance
+// loop.
+//
+// Ranges (must match generateApiVersions):
+//
+//	FindCoordinator  v0–v3
+//	JoinGroup        v1–v4 (capped at v4 — request decoder doesn't
+//	                        yet read GroupInstanceID introduced at
+//	                        v5; the encoder itself can produce v5,
+//	                        so the test exercises v1–v5)
+//	SyncGroup        v1–v5
+//	Heartbeat        v1–v4
+//	LeaveGroup       v0–v2 (encoder is version-agnostic; this just
+//	                        confirms it produces a non-empty payload)
+func TestConsumerGroupEncoders_VersionRange_P22_5(t *testing.T) {
+	t.Run("FindCoordinator_v0_v3", func(t *testing.T) {
+		errMsg := "ok"
+		for _, v := range []int16{0, 1, 2, 3} {
+			payload, err := EncodeFindCoordinatorResponse(&FindCoordinatorResponse{
+				CorrelationID: 1, ThrottleMs: 0, ErrorCode: 0,
+				ErrorMessage: &errMsg, NodeID: 1, Host: "h", Port: 9092,
+			}, v)
+			if err != nil {
+				t.Fatalf("v%d: %v", v, err)
+			}
+			if len(payload) == 0 {
+				t.Fatalf("v%d: empty payload", v)
+			}
+		}
+		if _, err := EncodeFindCoordinatorResponse(&FindCoordinatorResponse{}, 4); err == nil {
+			t.Fatal("v4 should be rejected (encoder upper bound)")
+		}
+	})
+
+	t.Run("JoinGroup_v1_v5", func(t *testing.T) {
+		mk := func() *JoinGroupResponse {
+			return &JoinGroupResponse{
+				CorrelationID: 1, ThrottleMs: 0, ErrorCode: 0,
+				GenerationID: 1, ProtocolName: "range",
+				LeaderID: "m1", MemberID: "m1",
+				Members: []JoinGroupMember{{MemberID: "m1", Metadata: []byte{0x01}}},
+			}
+		}
+		for _, v := range []int16{1, 2, 3, 4, 5} {
+			if _, err := EncodeJoinGroupResponse(mk(), v); err != nil {
+				t.Fatalf("v%d: %v", v, err)
+			}
+		}
+		if _, err := EncodeJoinGroupResponse(mk(), 6); err == nil {
+			t.Fatal("v6 should be rejected")
+		}
+	})
+
+	t.Run("SyncGroup_v1_v5", func(t *testing.T) {
+		mk := func() *SyncGroupResponse {
+			return &SyncGroupResponse{
+				CorrelationID: 1, ThrottleMs: 0, ErrorCode: 0,
+				Assignment: []byte{0xaa},
+			}
+		}
+		for _, v := range []int16{1, 2, 3, 4, 5} {
+			if _, err := EncodeSyncGroupResponse(mk(), v); err != nil {
+				t.Fatalf("v%d: %v", v, err)
+			}
+		}
+		if _, err := EncodeSyncGroupResponse(mk(), 6); err == nil {
+			t.Fatal("v6 should be rejected")
+		}
+	})
+
+	t.Run("Heartbeat_v1_v4", func(t *testing.T) {
+		mk := func() *HeartbeatResponse {
+			return &HeartbeatResponse{CorrelationID: 1, ThrottleMs: 0, ErrorCode: 0}
+		}
+		for _, v := range []int16{1, 2, 3, 4} {
+			if _, err := EncodeHeartbeatResponse(mk(), v); err != nil {
+				t.Fatalf("v%d: %v", v, err)
+			}
+		}
+		if _, err := EncodeHeartbeatResponse(mk(), 5); err == nil {
+			t.Fatal("v5 should be rejected")
+		}
+	})
+
+	t.Run("LeaveGroup_versionless", func(t *testing.T) {
+		// EncodeLeaveGroupResponse takes no version; just confirm the
+		// shape we advertise (v0–v2) is realised by the encoder.
+		payload, err := EncodeLeaveGroupResponse(&LeaveGroupResponse{
+			CorrelationID: 1, ErrorCode: 0,
+		})
+		if err != nil {
+			t.Fatalf("EncodeLeaveGroupResponse: %v", err)
+		}
+		if len(payload) != 6 {
+			t.Fatalf("expected 6-byte v0–v2 payload, got %d", len(payload))
+		}
+	})
+}
+
 func makeTestRecordBatch(count int32, baseOffset int64) []byte {
 	const size = 90
 	data := make([]byte, size)
