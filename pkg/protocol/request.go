@@ -1198,7 +1198,16 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 		}
 	case APIKeyOffsetCommit:
 		version := header.APIVersion
-		if version != 3 {
+		// PLAN-01 P22.9 widening. The decoder body below reads
+		// generationID + memberID (added at v1) and retentionMs (added
+		// at v2, removed at v5), so v1–v4 share the same wire layout
+		// and parse correctly here. v0 lacks generationID/memberID and
+		// would misparse; v5+ adds GroupInstanceID and flexible/tagged
+		// fields not handled yet. kafka-go's consumer defaults to v2,
+		// so v3-only was the gate that caused the
+		// `offset commit version 2 not supported` rejection observed
+		// after the P22.8 producer fix landed messages on the topic.
+		if version < 1 || version > 4 {
 			return nil, nil, fmt.Errorf("offset commit version %d not supported", version)
 		}
 		groupID, err := reader.String()

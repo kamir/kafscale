@@ -401,7 +401,7 @@ func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, re
 				CorrelationID: header.CorrelationID,
 				ThrottleMs:    0,
 				Topics:        topics,
-			})
+			}, header.APIVersion)
 		}
 		if !h.etcdAvailable() {
 			topics := make([]protocol.OffsetCommitTopicResponse, 0, len(req.Topics))
@@ -422,13 +422,13 @@ func (h *handler) Handle(ctx context.Context, header *protocol.RequestHeader, re
 				CorrelationID: header.CorrelationID,
 				ThrottleMs:    0,
 				Topics:        topics,
-			})
+			}, header.APIVersion)
 		}
 		resp, err := h.coordinator.OffsetCommit(ctx, req, header.CorrelationID)
 		if err != nil {
 			return nil, err
 		}
-		return protocol.EncodeOffsetCommitResponse(resp)
+		return protocol.EncodeOffsetCommitResponse(resp, header.APIVersion)
 	case *protocol.OffsetFetchRequest:
 		req := req.(*protocol.OffsetFetchRequest)
 		if !h.allowGroup(principal, req.GroupID, acl.ActionGroupRead) {
@@ -2691,12 +2691,14 @@ func generateApiVersions() []protocol.ApiVersion {
 		// v4 wire format and the decoder would misparse it as a single
 		// string. Narrow to what we actually implement.
 		{key: protocol.APIKeyLeaveGroup, minVersion: 0, maxVersion: 2},
-		// OffsetCommit: NOT widened in P22.5. Decoder is hardcoded to
-		// `version != 3 → error` and the encoder is hardcoded to the v3
-		// shape (always writes ThrottleMs). Widening here without first
-		// generalising both ends would just push the rejection one layer
-		// deeper. Tracked separately for P22.6.
-		{key: protocol.APIKeyOffsetCommit, minVersion: 3, maxVersion: 3},
+		// OffsetCommit widened to v1–v4 (PLAN-01 P22.9). Decoder body
+		// shares the same wire layout for v1–v4 (generationID/memberID
+		// at v1, retentionMs at v2, removed at v5); encoder is now
+		// version-aware about ThrottleMs (v3+ only). kafka-go's
+		// default is v2 — v3-only was the gate that caused the
+		// `offset commit version 2 not supported` rejection observed
+		// after P22.8 unblocked the producer.
+		{key: protocol.APIKeyOffsetCommit, minVersion: 1, maxVersion: 4},
 		// OffsetFetch widened to v1–v5: the encoder accepts the entire
 		// range, and clients on older kafka-go/librdkafka (Kafka 0.11–1.x
 		// era) negotiate down to v1/v2. Without this, those clients

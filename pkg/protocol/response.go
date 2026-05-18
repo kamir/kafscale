@@ -878,10 +878,18 @@ func EncodeLeaveGroupResponse(resp *LeaveGroupResponse) ([]byte, error) {
 	return w.Bytes(), nil
 }
 
-func EncodeOffsetCommitResponse(resp *OffsetCommitResponse) ([]byte, error) {
+// EncodeOffsetCommitResponse encodes the broker's response to an
+// OffsetCommit. ThrottleMs was added at v3; v1/v2 omit it. The body is
+// otherwise stable across v1–v4 (non-flexible). PLAN-01 P22.9.
+func EncodeOffsetCommitResponse(resp *OffsetCommitResponse, version int16) ([]byte, error) {
+	if version < 1 || version > 4 {
+		return nil, fmt.Errorf("offset commit response version %d not supported", version)
+	}
 	w := newByteWriter(256)
 	w.Int32(resp.CorrelationID)
-	w.Int32(resp.ThrottleMs)
+	if version >= 3 {
+		w.Int32(resp.ThrottleMs)
+	}
 	w.Int32(int32(len(resp.Topics)))
 	for _, topic := range resp.Topics {
 		w.String(topic.Name)

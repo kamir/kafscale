@@ -703,7 +703,7 @@ func (p *proxy) buildNotReadyResponse(header *protocol.RequestHeader, payload []
 			ThrottleMs:    0,
 			Topics:        topics,
 		}
-		return wrapEncode(protocol.EncodeOffsetCommitResponse(resp))
+		return wrapEncode(protocol.EncodeOffsetCommitResponse(resp, header.APIVersion))
 	case protocol.APIKeyOffsetFetch:
 		fetchReq := req.(*protocol.OffsetFetchRequest)
 		topics := make([]protocol.OffsetFetchTopicResponse, 0, len(fetchReq.Topics))
