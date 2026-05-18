@@ -156,8 +156,15 @@ type JoinGroupRequest struct {
 	SessionTimeoutMs   int32
 	RebalanceTimeoutMs int32
 	MemberID           string
-	ProtocolType       string
-	Protocols          []JoinGroupProtocol
+	// InstanceID is the static membership identifier (KIP-345),
+	// introduced at JoinGroup v5 as a nullable string between MemberID
+	// and ProtocolType. nil for v0–v4 or when the client did not send
+	// one. The broker currently parses but does not act on this field;
+	// it exists so the decoder can correctly advance past it on the
+	// wire.
+	InstanceID   *string
+	ProtocolType string
+	Protocols    []JoinGroupProtocol
 }
 
 func (JoinGroupRequest) APIKey() int16 { return APIKeyJoinGroup }
@@ -985,6 +992,21 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		// GroupInstanceID (KIP-345) was added to the JoinGroup wire
+		// format at v5 as a nullable string sandwiched between MemberID
+		// and ProtocolType. We must read it at v5+ so the rest of the
+		// message lines up — otherwise the null-marker (-1 as int16)
+		// gets misread as the length of ProtocolType and the request
+		// fails with `parse request: invalid string length: -1`.
+		// JoinGroup is non-flexible up to and including v5 (v6+ is
+		// flexible); plain NullableString is correct here.
+		var instanceID *string
+		if header.APIVersion >= 5 {
+			instanceID, err = reader.NullableString()
+			if err != nil {
+				return nil, nil, fmt.Errorf("read join group instance id: %w", err)
+			}
+		}
 		protocolType, err := reader.String()
 		if err != nil {
 			return nil, nil, err
@@ -1010,6 +1032,7 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 			SessionTimeoutMs:   sessionTimeout,
 			RebalanceTimeoutMs: rebalanceTimeout,
 			MemberID:           memberID,
+			InstanceID:         instanceID,
 			ProtocolType:       protocolType,
 			Protocols:          protocols,
 		}

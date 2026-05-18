@@ -849,3 +849,88 @@ func TestParseFetchRequest(t *testing.T) {
 		t.Fatalf("unexpected fetch data: %#v", fetchReq.Topics)
 	}
 }
+
+// TestParseJoinGroupRequest_V5_WithInstanceID verifies the decoder
+// advances past the v5-introduced GroupInstanceID nullable string
+// between MemberID and ProtocolType.
+//
+// Regression coverage for PLAN-01 P22.7: before this fix, a kafka-go
+// client picking JoinGroup v5 sent the GroupInstanceID null marker
+// (-1 as int16), the decoder skipped it, then read ProtocolType
+// starting at the wrong byte — produced
+// `parse request: invalid string length: -1` and broke the rebalance.
+func TestParseJoinGroupRequest_V5_WithInstanceID(t *testing.T) {
+	// Build a v5 wire-format request with InstanceID = nil (the common
+	// case kafka-go sends when the static-membership feature is not in
+	// use).
+	w := newByteWriter(128)
+	w.Int16(APIKeyJoinGroup)
+	w.Int16(5) // api version
+	w.Int32(42)
+	w.NullableString(nil)        // client id
+	w.String("g1")               // group id
+	w.Int32(30000)               // session timeout
+	w.Int32(60000)               // rebalance timeout
+	w.String("member-1")         // member id
+	w.NullableString(nil)                 // GROUP INSTANCE ID — the v5 addition
+	w.String("consumer")                  // protocol type
+	w.Int32(1)                            // protocol count
+	w.String("range")                     // protocol name
+	w.BytesWithLength([]byte{0x00, 0x01}) // metadata bytes
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest v5: %v", err)
+	}
+	join, ok := req.(*JoinGroupRequest)
+	if !ok {
+		t.Fatalf("expected *JoinGroupRequest got %T", req)
+	}
+	if join.GroupID != "g1" || join.MemberID != "member-1" {
+		t.Fatalf("unexpected join: %#v", join)
+	}
+	if join.InstanceID != nil {
+		t.Fatalf("expected nil InstanceID got %v", *join.InstanceID)
+	}
+	if join.ProtocolType != "consumer" {
+		t.Fatalf("expected consumer protocol type got %q", join.ProtocolType)
+	}
+	if len(join.Protocols) != 1 || join.Protocols[0].Name != "range" {
+		t.Fatalf("unexpected protocols: %#v", join.Protocols)
+	}
+}
+
+// TestParseJoinGroupRequest_V4_NoInstanceID confirms v4 still works —
+// i.e., the v5 read is correctly gated behind APIVersion >= 5 and not
+// applied to older clients.
+func TestParseJoinGroupRequest_V4_NoInstanceID(t *testing.T) {
+	w := newByteWriter(128)
+	w.Int16(APIKeyJoinGroup)
+	w.Int16(4)
+	w.Int32(43)
+	w.NullableString(nil)
+	w.String("g2")
+	w.Int32(30000)
+	w.Int32(60000)
+	w.String("member-2")
+	// NOTE: no InstanceID at v4 — decoder must NOT try to read one
+	w.String("consumer")
+	w.Int32(1)
+	w.String("range")
+	w.BytesWithLength([]byte{})
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest v4: %v", err)
+	}
+	join, ok := req.(*JoinGroupRequest)
+	if !ok {
+		t.Fatalf("expected *JoinGroupRequest got %T", req)
+	}
+	if join.InstanceID != nil {
+		t.Fatalf("v4 should have nil InstanceID, got %v", *join.InstanceID)
+	}
+	if join.MemberID != "member-2" || join.ProtocolType != "consumer" {
+		t.Fatalf("unexpected join: %#v", join)
+	}
+}

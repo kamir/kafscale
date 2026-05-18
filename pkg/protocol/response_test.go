@@ -1585,10 +1585,8 @@ func TestEncodeOffsetFetchResponse_VersionRange(t *testing.T) {
 // Ranges (must match generateApiVersions):
 //
 //	FindCoordinator  v0–v3
-//	JoinGroup        v1–v4 (capped at v4 — request decoder doesn't
-//	                        yet read GroupInstanceID introduced at
-//	                        v5; the encoder itself can produce v5,
-//	                        so the test exercises v1–v5)
+//	JoinGroup        v1–v5 (decoder reads GroupInstanceID at v5+ per
+//	                        P22.7; encoder already supported v5)
 //	SyncGroup        v1–v5
 //	Heartbeat        v1–v4
 //	LeaveGroup       v0–v2 (encoder is version-agnostic; this just
