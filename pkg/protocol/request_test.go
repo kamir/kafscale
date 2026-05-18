@@ -867,11 +867,11 @@ func TestParseJoinGroupRequest_V5_WithInstanceID(t *testing.T) {
 	w.Int16(APIKeyJoinGroup)
 	w.Int16(5) // api version
 	w.Int32(42)
-	w.NullableString(nil)        // client id
-	w.String("g1")               // group id
-	w.Int32(30000)               // session timeout
-	w.Int32(60000)               // rebalance timeout
-	w.String("member-1")         // member id
+	w.NullableString(nil)                 // client id
+	w.String("g1")                        // group id
+	w.Int32(30000)                        // session timeout
+	w.Int32(60000)                        // rebalance timeout
+	w.String("member-1")                  // member id
 	w.NullableString(nil)                 // GROUP INSTANCE ID — the v5 addition
 	w.String("consumer")                  // protocol type
 	w.Int32(1)                            // protocol count
@@ -932,5 +932,64 @@ func TestParseJoinGroupRequest_V4_NoInstanceID(t *testing.T) {
 	}
 	if join.MemberID != "member-2" || join.ProtocolType != "consumer" {
 		t.Fatalf("unexpected join: %#v", join)
+	}
+}
+
+func TestParseOffsetCommitRequest_V1_WithCommitTimestamp(t *testing.T) {
+	w := newByteWriter(160)
+	w.Int16(APIKeyOffsetCommit)
+	w.Int16(1)
+	w.Int32(44)
+	w.NullableString(nil)
+	w.String("g1")
+	w.Int32(7)
+	w.String("member-1")
+	w.Int32(1)
+	w.String("orders")
+	w.Int32(1)
+	w.Int32(0)
+	w.Int64(123)
+	w.Int64(456) // v1 commit timestamp
+	w.NullableString(strPtr("meta"))
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest v1 offset commit: %v", err)
+	}
+	commit, ok := req.(*OffsetCommitRequest)
+	if !ok {
+		t.Fatalf("expected *OffsetCommitRequest got %T", req)
+	}
+	if commit.GroupID != "g1" || commit.GenerationID != 7 || commit.MemberID != "member-1" {
+		t.Fatalf("unexpected commit request: %#v", commit)
+	}
+	if len(commit.Topics) != 1 || len(commit.Topics[0].Partitions) != 1 {
+		t.Fatalf("unexpected topics: %#v", commit.Topics)
+	}
+	part := commit.Topics[0].Partitions[0]
+	if part.Partition != 0 || part.Offset != 123 || part.CommitTimestamp != 456 || part.Metadata != "meta" {
+		t.Fatalf("unexpected partition: %#v", part)
+	}
+}
+
+func TestParseOffsetFetchRequest_NullTopicsDoesNotPanic(t *testing.T) {
+	w := newByteWriter(64)
+	w.Int16(APIKeyOffsetFetch)
+	w.Int16(2)
+	w.Int32(45)
+	w.NullableString(nil)
+	w.String("g1")
+	w.Int32(-1)
+
+	_, req, err := ParseRequest(w.Bytes())
+	if err != nil {
+		t.Fatalf("ParseRequest v2 offset fetch null topics: %v", err)
+	}
+	fetch, ok := req.(*OffsetFetchRequest)
+	if !ok {
+		t.Fatalf("expected *OffsetFetchRequest got %T", req)
+	}
+	if fetch.GroupID != "g1" || len(fetch.Topics) != 0 {
+		t.Fatalf("unexpected offset fetch request: %#v", fetch)
 	}
 }

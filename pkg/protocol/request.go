@@ -200,9 +200,10 @@ type LeaveGroupRequest struct {
 func (LeaveGroupRequest) APIKey() int16 { return APIKeyLeaveGroup }
 
 type OffsetCommitPartition struct {
-	Partition int32
-	Offset    int64
-	Metadata  string
+	Partition       int32
+	Offset          int64
+	CommitTimestamp int64
+	Metadata        string
 }
 
 type OffsetCommitTopic struct {
@@ -1198,13 +1199,12 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 		}
 	case APIKeyOffsetCommit:
 		version := header.APIVersion
-		// PLAN-01 P22.9 widening. The decoder body below reads
-		// generationID + memberID (added at v1) and retentionMs (added
-		// at v2, removed at v5), so v1–v4 share the same wire layout
-		// and parse correctly here. v0 lacks generationID/memberID and
-		// would misparse; v5+ adds GroupInstanceID and flexible/tagged
-		// fields not handled yet. kafka-go's consumer defaults to v2,
-		// so v3-only was the gate that caused the
+		// PLAN-01 P22.9 widening. v1 adds generationID/memberID and a
+		// per-partition commit timestamp; v2–v4 replace that timestamp
+		// with a top-level retentionMs. v0 lacks generationID/memberID
+		// and would misparse; v5+ adds GroupInstanceID and
+		// flexible/tagged fields not handled yet. kafka-go's consumer
+		// defaults to v2, so v3-only was the gate that caused the
 		// `offset commit version 2 not supported` rejection observed
 		// after the P22.8 producer fix landed messages on the topic.
 		if version < 1 || version > 4 {
@@ -1253,6 +1253,13 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 				if err != nil {
 					return nil, nil, err
 				}
+				var commitTimestamp int64
+				if version == 1 {
+					commitTimestamp, err = reader.Int64()
+					if err != nil {
+						return nil, nil, err
+					}
+				}
 				metaPtr, err := reader.NullableString()
 				if err != nil {
 					return nil, nil, err
@@ -1262,9 +1269,10 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 					meta = *metaPtr
 				}
 				partitions = append(partitions, OffsetCommitPartition{
-					Partition: partition,
-					Offset:    offset,
-					Metadata:  meta,
+					Partition:       partition,
+					Offset:          offset,
+					CommitTimestamp: commitTimestamp,
+					Metadata:        meta,
 				})
 			}
 			topics = append(topics, OffsetCommitTopic{Name: name, Partitions: partitions})
@@ -1284,6 +1292,10 @@ func ParseRequest(b []byte) (*RequestHeader, Request, error) {
 		topicCount, err := reader.Int32()
 		if err != nil {
 			return nil, nil, err
+		}
+		if topicCount < 0 {
+			req = &OffsetFetchRequest{GroupID: groupID}
+			break
 		}
 		topics := make([]OffsetFetchTopic, 0, topicCount)
 		for i := int32(0); i < topicCount; i++ {

@@ -1647,6 +1647,43 @@ func TestConsumerGroupEncoders_VersionRange_P22_5(t *testing.T) {
 		}
 	})
 
+	t.Run("SyncGroup_v5_nil_protocols_encode_non_null", func(t *testing.T) {
+		payload, err := EncodeSyncGroupResponse(&SyncGroupResponse{
+			CorrelationID: 1, ThrottleMs: 0, ErrorCode: 0,
+			Assignment: []byte{0xaa},
+		}, 5)
+		if err != nil {
+			t.Fatalf("v5 encode: %v", err)
+		}
+		reader := newByteReader(payload)
+		if _, err := reader.Int32(); err != nil {
+			t.Fatalf("correlation id: %v", err)
+		}
+		if err := reader.SkipTaggedFields(); err != nil {
+			t.Fatalf("response header tags: %v", err)
+		}
+		if _, err := reader.Int32(); err != nil {
+			t.Fatalf("throttle: %v", err)
+		}
+		if _, err := reader.Int16(); err != nil {
+			t.Fatalf("error code: %v", err)
+		}
+		protocolType, err := reader.CompactNullableString()
+		if err != nil {
+			t.Fatalf("protocol type: %v", err)
+		}
+		protocolName, err := reader.CompactNullableString()
+		if err != nil {
+			t.Fatalf("protocol name: %v", err)
+		}
+		if protocolType == nil || *protocolType != "" {
+			t.Fatalf("expected non-null empty protocol type, got %v", protocolType)
+		}
+		if protocolName == nil || *protocolName != "" {
+			t.Fatalf("expected non-null empty protocol name, got %v", protocolName)
+		}
+	})
+
 	t.Run("Heartbeat_v1_v4", func(t *testing.T) {
 		mk := func() *HeartbeatResponse {
 			return &HeartbeatResponse{CorrelationID: 1, ThrottleMs: 0, ErrorCode: 0}

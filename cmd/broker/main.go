@@ -2691,10 +2691,10 @@ func generateApiVersions() []protocol.ApiVersion {
 		// v4 wire format and the decoder would misparse it as a single
 		// string. Narrow to what we actually implement.
 		{key: protocol.APIKeyLeaveGroup, minVersion: 0, maxVersion: 2},
-		// OffsetCommit widened to v1–v4 (PLAN-01 P22.9). Decoder body
-		// shares the same wire layout for v1–v4 (generationID/memberID
-		// at v1, retentionMs at v2, removed at v5); encoder is now
-		// version-aware about ThrottleMs (v3+ only). kafka-go's
+		// OffsetCommit widened to v1–v4 (PLAN-01 P22.9). Decoder handles
+		// v1's per-partition commit timestamp and v2–v4's top-level
+		// retentionMs; encoder is now version-aware about ThrottleMs
+		// (v3+ only). kafka-go's
 		// default is v2 — v3-only was the gate that caused the
 		// `offset commit version 2 not supported` rejection observed
 		// after P22.8 unblocked the producer.

@@ -834,12 +834,22 @@ func EncodeSyncGroupResponse(resp *SyncGroupResponse, version int16) ([]byte, er
 	}
 	w.Int16(resp.ErrorCode)
 	if version >= 5 {
+		protocolType := resp.ProtocolType
+		protocolName := resp.ProtocolName
+		if protocolType == nil {
+			empty := ""
+			protocolType = &empty
+		}
+		if protocolName == nil {
+			empty := ""
+			protocolName = &empty
+		}
 		if flexible {
-			w.CompactNullableString(resp.ProtocolType)
-			w.CompactNullableString(resp.ProtocolName)
+			w.CompactNullableString(protocolType)
+			w.CompactNullableString(protocolName)
 		} else {
-			w.NullableString(resp.ProtocolType)
-			w.NullableString(resp.ProtocolName)
+			w.NullableString(protocolType)
+			w.NullableString(protocolName)
 		}
 	}
 	if flexible {
