@@ -895,7 +895,18 @@ func EncodeOffsetCommitResponse(resp *OffsetCommitResponse) ([]byte, error) {
 }
 
 func EncodeOffsetFetchResponse(resp *OffsetFetchResponse, version int16) ([]byte, error) {
-	if version < 3 || version > 5 {
+	// Accept v1–v5. The encoder below already gates version-introduced
+	// fields (ThrottleMs added in v3, top-level ErrorCode added in v2,
+	// per-partition LeaderEpoch added in v5), so widening the lower bound
+	// is a no-op at the wire level for any properly-negotiated client.
+	//
+	// Why widen: older librdkafka/kafka-go clients (Kafka 0.11–1.x era)
+	// send OffsetFetch at v1/v2. The previous v3-only gate caused those
+	// clients to silently fail consumer-group join — the consumer could
+	// never read its starting offset, kept rejoining, and the broker
+	// returned REBALANCE_IN_PROGRESS forever (see issue noted in
+	// scalytics-all-in-one-meta PLAN-01 P22.3).
+	if version < 1 || version > 5 {
 		return nil, fmt.Errorf("offset fetch response version %d not supported", version)
 	}
 	w := newByteWriter(256)

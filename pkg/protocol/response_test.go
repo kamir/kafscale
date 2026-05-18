@@ -18,6 +18,7 @@ package protocol
 import (
 	"encoding/binary"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -1457,6 +1458,64 @@ func TestEncodeOffsetFetchResponse(t *testing.T) {
 	}
 	if reader.remaining() != 0 {
 		t.Fatalf("unexpected trailing bytes %d", reader.remaining())
+	}
+}
+
+// TestEncodeOffsetFetchResponse_VersionRange verifies that the encoder
+// accepts every version in the supported range (v1–v5) and rejects
+// anything outside it.
+//
+// Regression coverage for PLAN-01 P22.3: clients on older
+// librdkafka/kafka-go (Kafka 0.11–1.x era) negotiate OffsetFetch at
+// v1/v2. The previous v3-only gate caused those clients to silently
+// fail consumer-group join — the consumer could never read its
+// starting offset and the broker returned REBALANCE_IN_PROGRESS on
+// every poll forever. See PLAN-01 P22.3 in
+// scalytics-all-in-one-meta for the full diagnostic.
+func TestEncodeOffsetFetchResponse_VersionRange(t *testing.T) {
+	mkResp := func() *OffsetFetchResponse {
+		return &OffsetFetchResponse{
+			CorrelationID: 7,
+			ThrottleMs:    0,
+			Topics: []OffsetFetchTopicResponse{
+				{
+					Name: "t1",
+					Partitions: []OffsetFetchPartitionResponse{
+						{Partition: 0, Offset: 100, LeaderEpoch: -1, Metadata: strPtr(""), ErrorCode: NONE},
+					},
+				},
+			},
+			ErrorCode: NONE,
+		}
+	}
+
+	// In-range: every supported version must encode without error.
+	for _, version := range []int16{1, 2, 3, 4, 5} {
+		t.Run("ok_v"+string(rune('0'+version)), func(t *testing.T) {
+			payload, err := EncodeOffsetFetchResponse(mkResp(), version)
+			if err != nil {
+				t.Fatalf("v%d: unexpected error: %v", version, err)
+			}
+			if len(payload) == 0 {
+				t.Fatalf("v%d: empty payload", version)
+			}
+			// Sanity: correlation ID is the first 4 bytes regardless of version.
+			reader := newByteReader(payload)
+			corr, _ := reader.Int32()
+			if corr != 7 {
+				t.Fatalf("v%d: correlation id %d != 7", version, corr)
+			}
+		})
+	}
+
+	// Out-of-range: must reject.
+	for _, version := range []int16{0, 6, 7, -1} {
+		t.Run("reject_v"+strconv.Itoa(int(version)), func(t *testing.T) {
+			_, err := EncodeOffsetFetchResponse(mkResp(), version)
+			if err == nil {
+				t.Fatalf("v%d: expected rejection, got nil error", version)
+			}
+		})
 	}
 }
 

@@ -2650,7 +2650,11 @@ func generateApiVersions() []protocol.ApiVersion {
 		{key: protocol.APIKeyHeartbeat, minVersion: 4, maxVersion: 4},
 		{key: protocol.APIKeyLeaveGroup, minVersion: 4, maxVersion: 4},
 		{key: protocol.APIKeyOffsetCommit, minVersion: 3, maxVersion: 3},
-		{key: protocol.APIKeyOffsetFetch, minVersion: 5, maxVersion: 5},
+		// OffsetFetch widened to v1–v5: the encoder accepts the entire
+		// range, and clients on older kafka-go/librdkafka (Kafka 0.11–1.x
+		// era) negotiate down to v1/v2. Without this, those clients
+		// silently fail consumer-group join — see PLAN-01 P22.3.
+		{key: protocol.APIKeyOffsetFetch, minVersion: 1, maxVersion: 5},
 		{key: protocol.APIKeyDescribeGroups, minVersion: 5, maxVersion: 5},
 		{key: protocol.APIKeyListGroups, minVersion: 5, maxVersion: 5},
 		{key: protocol.APIKeyOffsetForLeaderEpoch, minVersion: 3, maxVersion: 3},
