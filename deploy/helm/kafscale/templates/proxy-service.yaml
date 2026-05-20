@@ -38,4 +38,10 @@ spec:
       port: {{ .Values.proxy.service.port }}
       targetPort: kafka
       protocol: TCP
+{{- if .Values.proxy.lfs.http.enabled }}
+    - name: lfs-http
+      port: {{ .Values.proxy.lfs.http.service.port }}
+      targetPort: lfs-http
+      protocol: TCP
+{{- end }}
 {{- end }}

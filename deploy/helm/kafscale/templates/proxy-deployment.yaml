@@ -86,6 +86,10 @@ spec:
             - name: KAFSCALE_PROXY_BACKENDS
               value: "{{ join "," .Values.proxy.backends }}"
 {{- end }}
+{{- if .Values.proxy.lfs.http.enabled }}
+            - name: KAFSCALE_LFS_PROXY_HTTP_ADDR
+              value: ":{{ .Values.proxy.lfs.http.port }}"
+{{- end }}
           ports:
             - name: kafka
               containerPort: {{ .Values.proxy.service.port }}
@@ -94,6 +98,13 @@ spec:
             - name: health
               containerPort: {{ .Values.proxy.health.port }}
               protocol: TCP
+{{- end }}
+{{- if .Values.proxy.lfs.http.enabled }}
+            - name: lfs-http
+              containerPort: {{ .Values.proxy.lfs.http.port }}
+              protocol: TCP
+{{- end }}
+{{- if .Values.proxy.health.enabled }}
           readinessProbe:
             httpGet:
               path: /readyz

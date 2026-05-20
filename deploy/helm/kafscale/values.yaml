@@ -165,6 +165,21 @@ proxy:
   health:
     enabled: true
     port: 9094
+  # LFS HTTP listener. The proxy binary already serves /lfs/produce,
+  # /lfs/download, /lfs/uploads on a separate HTTP port when
+  # KAFSCALE_LFS_PROXY_HTTP_ADDR is set. Closing BUG-0008 / iter-7
+  # E-15: the chart now wires the env var so clients (kafclaw, etc.)
+  # can reach the real LFS endpoint without the bp-001
+  # `kafscaleProxyStub` workaround.
+  lfs:
+    http:
+      enabled: false
+      port: 8081
+      # Service to expose the LFS HTTP port. ClusterIP-only by
+      # default; flip to NodePort/LoadBalancer per environment.
+      service:
+        type: ClusterIP
+        port: 8081
   backendCacheTTLSeconds: 60
   advertisedHost: ""
   advertisedPort: 9092
