@@ -193,21 +193,31 @@ func cloneTopics(topics []protocol.MetadataTopic) []protocol.MetadataTopic {
 	if len(topics) == 0 {
 		return nil
 	}
-	out := make([]protocol.MetadataTopic, len(topics))
-	for i, topic := range topics {
+	out := make([]protocol.MetadataTopic, 0, len(topics))
+	for _, topic := range topics {
+		// Defensive: skip a malformed metadata entry that has no topic
+		// name. A nil Topic pointer can arise from a partial etcd write
+		// (e.g. a CreateTopics whose metadata Put was interrupted by an
+		// etcd NOSPACE window — see BUG-0015). Dereferencing it here on
+		// the proxy's startup snapshot path (refreshSnapshot -> Update ->
+		// cloneMetadata -> cloneTopics) crashed the proxy with a nil
+		// pointer panic and was the root cause of BUG-0014.
+		if topic.Topic == nil {
+			continue
+		}
 		topicID := topic.TopicID
 		name := *topic.Topic
 		if topicID == ([16]byte{}) {
 			topicID = TopicIDForName(name)
 		}
-		out[i] = protocol.MetadataTopic{
+		out = append(out, protocol.MetadataTopic{
 			ErrorCode:            topic.ErrorCode,
 			Topic:                kmsg.StringPtr(name),
 			TopicID:              topicID,
 			IsInternal:           topic.IsInternal,
 			Partitions:           clonePartitions(topic.Partitions),
 			AuthorizedOperations: topic.AuthorizedOperations,
-		}
+		})
 	}
 	return out
 }
