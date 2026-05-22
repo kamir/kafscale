@@ -99,6 +99,8 @@ func TestEnsureEtcdCreatesManagedCluster(t *testing.T) {
 	if len(sts.Spec.Template.Spec.InitContainers) == 0 {
 		t.Fatalf("expected snapshot restore init containers")
 	}
+	// BUG-0012: managed etcd STS must carry the soft hostname anti-affinity.
+	assertSoftHostAntiAffinity(t, sts, "kafscale-etcd")
 }
 
 func TestEnsureEtcdEnvOverrides(t *testing.T) {

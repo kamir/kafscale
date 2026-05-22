@@ -270,6 +270,56 @@ func TestReconcileLfsProxyService(t *testing.T) {
 	}
 }
 
+// TestReconcileBrokerStatefulSetAntiAffinity proves BUG-0012: the operator-built
+// broker StatefulSet carries a soft (preferred) pod anti-affinity over its own
+// labels keyed on the hostname topology, so replicas spread across nodes without
+// going Pending on a single-node cluster.
+func TestReconcileBrokerStatefulSetAntiAffinity(t *testing.T) {
+	cluster := &kafscalev1alpha1.KafscaleCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Spec: kafscalev1alpha1.KafscaleClusterSpec{
+			Brokers: kafscalev1alpha1.BrokerSpec{},
+			S3:      kafscalev1alpha1.S3Spec{Bucket: "bucket", Region: "us-east-1", CredentialsSecretRef: "creds"},
+		},
+	}
+	scheme := testScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster).Build()
+	r := &ClusterReconciler{Client: c, Scheme: scheme}
+
+	if err := r.reconcileBrokerDeployment(context.Background(), cluster, []string{"http://etcd:2379"}); err != nil {
+		t.Fatalf("reconcile broker deployment: %v", err)
+	}
+
+	sts := &appsv1.StatefulSet{}
+	assertFound(t, c, sts, cluster.Namespace, cluster.Name+"-broker")
+	assertSoftHostAntiAffinity(t, sts, "kafscale-broker")
+}
+
+// assertSoftHostAntiAffinity checks the StatefulSet pod template has exactly the
+// soft hostname anti-affinity from softPodAntiAffinity, selecting on app=<app>.
+func assertSoftHostAntiAffinity(t *testing.T, sts *appsv1.StatefulSet, app string) {
+	t.Helper()
+	aff := sts.Spec.Template.Spec.Affinity
+	if aff == nil || aff.PodAntiAffinity == nil {
+		t.Fatalf("expected pod anti-affinity, got %+v", aff)
+	}
+	terms := aff.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+	if len(terms) != 1 {
+		t.Fatalf("expected 1 preferred anti-affinity term, got %d", len(terms))
+	}
+	if terms[0].PodAffinityTerm.TopologyKey != "kubernetes.io/hostname" {
+		t.Fatalf("expected hostname topology key, got %q", terms[0].PodAffinityTerm.TopologyKey)
+	}
+	sel := terms[0].PodAffinityTerm.LabelSelector
+	if sel == nil || sel.MatchLabels["app"] != app {
+		t.Fatalf("expected selector app=%q, got %+v", app, sel)
+	}
+	// Required (hard) anti-affinity would strand replicas on single-node KIND.
+	if len(aff.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 {
+		t.Fatalf("anti-affinity must be soft, found required terms")
+	}
+}
+
 func TestServiceParsingHelpers(t *testing.T) {
 	if got := parseServiceType("LoadBalancer"); got != corev1.ServiceTypeLoadBalancer {
 		t.Fatalf("expected LoadBalancer, got %q", got)
