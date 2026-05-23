@@ -66,6 +66,16 @@ type proxy struct {
 	backendRetries int
 	backendBackoff time.Duration
 	lfs            *lfsModule // nil when LFS disabled
+
+	// PLAN-03 Change A: auto-create unknown topics seen in MetadataRequest.
+	// The broker has the same behaviour on its metadata handler
+	// (KAFSCALE_AUTO_CREATE_TOPICS=true), but the proxy serves metadata
+	// from its own etcd-backed cache and never forwards the request to a
+	// broker. Without this, Java AdminClient + console-producer +
+	// franz-go kadm all see "topic does not exist" and time out before
+	// the broker's auto-create ever has a chance to fire.
+	autoCreateTopics     bool
+	autoCreatePartitions int32
 }
 
 func main() {
@@ -107,20 +117,28 @@ func main() {
 		backendBackoff = 500 * time.Millisecond
 	}
 
+	autoCreateTopics := parseEnvBool("KAFSCALE_AUTO_CREATE_TOPICS", true)
+	autoCreatePartitions := int32(envInt("KAFSCALE_AUTO_CREATE_PARTITIONS", 1))
+	if autoCreatePartitions < 1 {
+		autoCreatePartitions = 1
+	}
+
 	p := &proxy{
-		addr:           addr,
-		advertisedHost: advertisedHost,
-		advertisedPort: advertisedPort,
-		store:          store,
-		backends:       backends,
-		logger:         logger,
-		dialTimeout:    5 * time.Second,
-		cacheTTL:       cacheTTL,
-		apiVersions:    generateProxyApiVersions(),
-		brokerAddrs:    make(map[string]string),
-		topicNames:     make(map[[16]byte]string),
-		backendRetries: backendRetries,
-		backendBackoff: backendBackoff,
+		addr:                 addr,
+		advertisedHost:       advertisedHost,
+		advertisedPort:       advertisedPort,
+		store:                store,
+		backends:             backends,
+		logger:               logger,
+		dialTimeout:          5 * time.Second,
+		cacheTTL:             cacheTTL,
+		apiVersions:          generateProxyApiVersions(),
+		brokerAddrs:          make(map[string]string),
+		topicNames:           make(map[[16]byte]string),
+		backendRetries:       backendRetries,
+		backendBackoff:       backendBackoff,
+		autoCreateTopics:     autoCreateTopics,
+		autoCreatePartitions: autoCreatePartitions,
 	}
 
 	if etcdStore, ok := store.(*metadata.EtcdStore); ok {
@@ -215,6 +233,21 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(val)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+// parseEnvBool reads a boolean env var. Accepts the usual Go strconv.ParseBool
+// shapes (1/t/T/TRUE/true/True and the false variants). Falls back to the
+// provided default on any parse error or missing value.
+func parseEnvBool(key string, fallback bool) bool {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(val)
 	if err != nil {
 		return fallback
 	}
@@ -1003,12 +1036,76 @@ func (p *proxy) handleMetadata(ctx context.Context, header *protocol.RequestHead
 		return nil, fmt.Errorf("unexpected metadata request type %T", req)
 	}
 
+	// PLAN-03 Change A: auto-create any unknown topics the client asks
+	// about before composing the metadata response. The broker performs
+	// the same step on its own metadata handler, but the proxy serves
+	// metadata from its etcd-backed cache and never forwards the request
+	// to a broker. Without this hop, the Java AdminClient's
+	// metadata-pre-fetch and the franz-go ProducerSync auto-create-on-
+	// produce path both see UNKNOWN_TOPIC_OR_PARTITION (or the older
+	// REQUEST_TIMED_OUT response shape) and time out. Etcd is the shared
+	// source of truth, so CreateTopic via the proxy's store is visible
+	// to every broker immediately.
+	if p.autoCreateTopics && len(metaReq.Topics) > 0 {
+		p.autoCreateUnknownTopics(ctx, metaReq)
+	}
+
 	meta, err := p.loadMetadata(ctx, metaReq)
 	if err != nil {
 		return nil, err
 	}
 	resp := buildProxyMetadataResponse(meta, header.CorrelationID, header.APIVersion, p.advertisedHost, p.advertisedPort)
 	return protocol.EncodeResponse(header.CorrelationID, header.APIVersion, resp), nil
+}
+
+// autoCreateUnknownTopics calls store.CreateTopic for each topic name in the
+// metadata request that does not yet exist. Errors are logged and swallowed:
+// ErrTopicExists from a concurrent creator is fine, every other error leaves
+// the topic in the existing UNKNOWN_TOPIC_OR_PARTITION state for the response
+// shape, so the client sees the same error code path it would have seen
+// without auto-create.
+func (p *proxy) autoCreateUnknownTopics(ctx context.Context, metaReq *kmsg.MetadataRequest) {
+	var topicNames []string
+	for _, t := range metaReq.Topics {
+		if t.Topic == nil {
+			continue
+		}
+		name := strings.TrimSpace(*t.Topic)
+		if name == "" {
+			continue
+		}
+		topicNames = append(topicNames, name)
+	}
+	if len(topicNames) == 0 {
+		return
+	}
+	existing, err := p.store.Metadata(ctx, topicNames)
+	if err != nil {
+		p.logger.Warn("auto-create: pre-flight metadata lookup failed", "error", err)
+		return
+	}
+	known := make(map[string]bool, len(existing.Topics))
+	for _, et := range existing.Topics {
+		if et.Topic == nil || et.ErrorCode != protocol.NONE {
+			continue
+		}
+		known[*et.Topic] = true
+	}
+	for _, name := range topicNames {
+		if known[name] {
+			continue
+		}
+		spec := metadata.TopicSpec{
+			Name:              name,
+			NumPartitions:     p.autoCreatePartitions,
+			ReplicationFactor: 1,
+		}
+		if _, err := p.store.CreateTopic(ctx, spec); err != nil && !errors.Is(err, metadata.ErrTopicExists) {
+			p.logger.Warn("auto-create topic failed", "topic", name, "error", err)
+			continue
+		}
+		p.logger.Info("auto-created topic via metadata request", "topic", name, "partitions", p.autoCreatePartitions)
+	}
 }
 
 func (p *proxy) handleFindCoordinator(header *protocol.RequestHeader) ([]byte, error) {
@@ -1442,6 +1539,27 @@ func (p *proxy) refreshMetadataCache(ctx context.Context) {
 		p.updateBrokerAddrs(meta.Brokers)
 		p.updateTopicNames(meta.Topics)
 		p.touchHealthy()
+		// PLAN-03 Change A (prerequisite): mark the proxy ready as soon as
+		// etcd has at least one broker registered. The legacy gate at
+		// main.go:163 only fires when KAFSCALE_PROXY_BACKENDS is set
+		// explicitly; under the operator-managed deployment that env is
+		// empty and the proxy never left the not-ready state. With this
+		// hook, the 30-second etcd refresh transitions the proxy to
+		// ready, which unblocks handleMetadata + the auto-create path.
+		if !p.isReady() && len(meta.Brokers) > 0 {
+			addrs := make([]string, 0, len(meta.Brokers))
+			for _, broker := range meta.Brokers {
+				if broker.Host == "" || broker.Port == 0 {
+					continue
+				}
+				addrs = append(addrs, fmt.Sprintf("%s:%d", broker.Host, broker.Port))
+			}
+			if len(addrs) > 0 {
+				p.setCachedBackends(addrs)
+				p.setReady(true)
+				p.logger.Info("proxy ready: etcd-discovered brokers", "count", len(addrs))
+			}
+		}
 		return nil, nil
 	})
 	if err != nil {
