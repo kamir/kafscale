@@ -38,6 +38,9 @@ spec:
       port: {{ .Values.proxy.service.port }}
       targetPort: kafka
       protocol: TCP
+      {{- if and (eq .Values.proxy.service.type "NodePort") .Values.proxy.service.nodePort }}
+      nodePort: {{ .Values.proxy.service.nodePort }}
+      {{- end }}
 {{- if .Values.proxy.lfs.http.enabled }}
     - name: lfs-http
       port: {{ .Values.proxy.lfs.http.service.port }}
