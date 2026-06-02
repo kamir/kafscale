@@ -36,10 +36,10 @@ jobs:
             image: kafscale-broker
             context: .
             file: deploy/docker/broker.Dockerfile
-          - name: lfs-proxy
-            image: kafscale-lfs-proxy
-            context: .
-            file: deploy/docker/lfs-proxy.Dockerfile
+          # lfs-proxy removed: LFS moved into the broker/console
+          # (internal/console/lfs_*.go); deploy/docker/lfs-proxy.Dockerfile no
+          # longer exists. A dedicated kafscale-lfs-proxy image conflicts with
+          # the in-broker LFS. Do not re-add this matrix entry.
           - name: operator
             image: kafscale-operator
             context: .
