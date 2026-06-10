@@ -394,8 +394,9 @@ func (p *proxy) haveBackend(ctx context.Context) bool {
 	return err == nil && len(backends) > 0
 }
 
-// fetchProbe sends a minimal Fetch (v13, no topics) to a backend and confirms
-// the proxy can forward it and decode the response. The proxy is a full Fetch
+// fetchProbe sends a minimal Fetch (v13, one dummy unknown-topic partition) to
+// a backend and confirms the proxy can forward it and decode the response. The
+// proxy is a full Fetch
 // codec (it decodes, merges and re-encodes broker Fetch responses), so any
 // proxy<->broker v13 (de)serialization or connection-state mismatch breaks
 // consume while metadata/ListOffsets still work. This is exactly the BUG-0026
@@ -426,9 +427,21 @@ func (p *proxy) fetchProbe(ctx context.Context) error {
 	req.ReplicaID = -1 // ordinary consumer
 	req.MaxWaitMillis = 0
 	req.MinBytes = 0
-	// No topics: returns immediately with an empty FetchResponse, which still
-	// round-trips the v13 response envelope through the broker and the proxy's
-	// decoder — enough to catch the EOF / "not enough data" failure.
+	// One dummy topic/partition keyed by a non-zero, almost-certainly-unknown
+	// TopicID (Fetch v13 keys by topic ID, not name). The broker resolves it,
+	// finds no match and returns a decodable UNKNOWN_TOPIC_ID response. That
+	// round-trips the full v13 Fetch codec — the exact path that returns
+	// EOF/undecodable in the BUG-0026 broken state — without depending on any
+	// real topic. An empty-topics Fetch is NOT used: the broker closes the
+	// connection on it (EOF), which would wedge readiness permanently.
+	probePart := kmsg.NewFetchRequestTopicPartition()
+	probePart.Partition = 0
+	probePart.FetchOffset = 0
+	probePart.PartitionMaxBytes = 1
+	probeTopic := kmsg.NewFetchRequestTopic()
+	probeTopic.TopicID = [16]byte{0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89}
+	probeTopic.Partitions = []kmsg.FetchRequestTopicPartition{probePart}
+	req.Topics = []kmsg.FetchRequestTopic{probeTopic}
 	payload := encodeFetchRequest(header, req)
 
 	respBytes, err := p.forwardToBackend(probeCtx, conn, addr, payload)
