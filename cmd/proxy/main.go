@@ -442,16 +442,25 @@ func (p *proxy) fetchProbe(ctx context.Context) error {
 	probeTopic.TopicID = [16]byte{0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89}
 	probeTopic.Partitions = []kmsg.FetchRequestTopicPartition{probePart}
 	req.Topics = []kmsg.FetchRequestTopic{probeTopic}
-	payload := encodeFetchRequest(header, req)
+	// encodeFetchRequest (kmsg AppendRequest) already prepends the 4-byte length
+	// prefix, and forwardToBackend's WriteFrame prepends its own — strip the inner
+	// one so the broker does not read the length bytes as the API key/version
+	// (it decodes the double-framed request as garbage "Produce v112" and closes).
+	framed := encodeFetchRequest(header, req)
+	if len(framed) < 4 {
+		return fmt.Errorf("fetch probe: encoded request too short (%d bytes)", len(framed))
+	}
+	payload := framed[4:]
 
 	respBytes, err := p.forwardToBackend(probeCtx, conn, addr, payload)
 	if err != nil {
 		return fmt.Errorf("fetch probe forward to %s: %w", addr, err)
 	}
-	resp := kmsg.NewPtrFetchResponse()
-	resp.Version = fetchVersion
-	if err := resp.ReadFrom(respBytes); err != nil {
-		return fmt.Errorf("fetch probe decode v%d from %s: %w", fetchVersion, addr, err)
+	// Same decode path the proxy uses for real fetches (strips the response
+	// header, then kmsg ReadFrom). Returns the canonical "decode fetch response
+	// vN: not enough data" error in the BUG-0026 broken state.
+	if _, err := parseFetchResponse(respBytes, fetchVersion); err != nil {
+		return fmt.Errorf("fetch probe from %s: %w", addr, err)
 	}
 	return nil
 }
