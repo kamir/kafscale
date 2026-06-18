@@ -65,7 +65,11 @@ type proxy struct {
 	metaFlight     singleflight.Group
 	backendRetries int
 	backendBackoff time.Duration
-	lfs            *lfsModule // nil when LFS disabled
+	// readyzFetchProbe gates /readyz on an actual Fetch round-trip to a backend
+	// (decode-clean), not just "a backend exists". Enforces coordinated startup
+	// ordering and catches the post-reboot v13 EOF/short-frame state (BUG-0026).
+	readyzFetchProbe bool
+	lfs              *lfsModule // nil when LFS disabled
 }
 
 func main() {
@@ -121,6 +125,10 @@ func main() {
 		topicNames:     make(map[[16]byte]string),
 		backendRetries: backendRetries,
 		backendBackoff: backendBackoff,
+		// Default on: readiness requires a decodable Fetch round-trip. Set
+		// KAFSCALE_PROXY_READYZ_FETCH_PROBE=false to fall back to the shallow
+		// "a backend exists" check.
+		readyzFetchProbe: lfsEnvBoolDefault("KAFSCALE_PROXY_READYZ_FETCH_PROBE", true),
 	}
 
 	if etcdStore, ok := store.(*metadata.EtcdStore); ok {
@@ -349,6 +357,28 @@ func (p *proxy) cacheFresh() bool {
 // fetch only when the cache TTL has expired (e.g. no traffic for >60s).
 // The fallback uses a short timeout to prevent health probes from blocking.
 func (p *proxy) checkReady(ctx context.Context) bool {
+	if !p.haveBackend(ctx) {
+		return false
+	}
+	// Deep gate: a known backend is necessary but not sufficient. After an
+	// uncoordinated restart the broker can return an EOF / short v13 Fetch
+	// response that the proxy cannot decode (BUG-0026); the shallow check above
+	// still passes and the proxy would serve traffic that silently returns 0
+	// records. Require an actual Fetch round-trip that decodes before going Ready,
+	// which keeps the proxy NotReady until the broker truly serves Fetch and so
+	// enforces coordinated startup ordering.
+	if p.readyzFetchProbe {
+		if err := p.fetchProbe(ctx); err != nil {
+			p.logger.Warn("readyz fetch probe failed; staying NotReady", "error", err)
+			return false
+		}
+	}
+	return true
+}
+
+// haveBackend reports whether the proxy knows of at least one broker backend
+// (the original shallow readiness check).
+func (p *proxy) haveBackend(ctx context.Context) bool {
 	if len(p.backends) > 0 {
 		return true
 	}
@@ -362,6 +392,77 @@ func (p *proxy) checkReady(ctx context.Context) bool {
 	defer cancel()
 	backends, err := p.currentBackends(checkCtx)
 	return err == nil && len(backends) > 0
+}
+
+// fetchProbe sends a minimal Fetch (v13, one dummy unknown-topic partition) to
+// a backend and confirms the proxy can forward it and decode the response. The
+// proxy is a full Fetch
+// codec (it decodes, merges and re-encodes broker Fetch responses), so any
+// proxy<->broker v13 (de)serialization or connection-state mismatch breaks
+// consume while metadata/ListOffsets still work. This is exactly the BUG-0026
+// failure mode after an uncoordinated reboot. Probing a real round-trip (on a
+// fresh connection, so a stale/half-open backend connection is detected too)
+// makes readiness reflect "the broker actually serves Fetch", not merely "a
+// backend exists".
+func (p *proxy) fetchProbe(ctx context.Context) error {
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	conn, addr, err := p.connectBackendExcluding(probeCtx, nil)
+	if err != nil {
+		return fmt.Errorf("fetch probe: no backend: %w", err)
+	}
+	defer conn.Close()
+
+	const fetchVersion int16 = 13
+	clientID := "kafscale-proxy-readyz"
+	header := &protocol.RequestHeader{
+		APIKey:        protocol.APIKeyFetch,
+		APIVersion:    fetchVersion,
+		CorrelationID: 0,
+		ClientID:      &clientID,
+	}
+	req := kmsg.NewPtrFetchRequest()
+	req.Version = fetchVersion
+	req.ReplicaID = -1 // ordinary consumer
+	req.MaxWaitMillis = 0
+	req.MinBytes = 0
+	// One dummy topic/partition keyed by a non-zero, almost-certainly-unknown
+	// TopicID (Fetch v13 keys by topic ID, not name). The broker resolves it,
+	// finds no match and returns a decodable UNKNOWN_TOPIC_ID response. That
+	// round-trips the full v13 Fetch codec — the exact path that returns
+	// EOF/undecodable in the BUG-0026 broken state — without depending on any
+	// real topic. An empty-topics Fetch is NOT used: the broker closes the
+	// connection on it (EOF), which would wedge readiness permanently.
+	probePart := kmsg.NewFetchRequestTopicPartition()
+	probePart.Partition = 0
+	probePart.FetchOffset = 0
+	probePart.PartitionMaxBytes = 1
+	probeTopic := kmsg.NewFetchRequestTopic()
+	probeTopic.TopicID = [16]byte{0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89}
+	probeTopic.Partitions = []kmsg.FetchRequestTopicPartition{probePart}
+	req.Topics = []kmsg.FetchRequestTopic{probeTopic}
+	// encodeFetchRequest (kmsg AppendRequest) already prepends the 4-byte length
+	// prefix, and forwardToBackend's WriteFrame prepends its own — strip the inner
+	// one so the broker does not read the length bytes as the API key/version
+	// (it decodes the double-framed request as garbage "Produce v112" and closes).
+	framed := encodeFetchRequest(header, req)
+	if len(framed) < 4 {
+		return fmt.Errorf("fetch probe: encoded request too short (%d bytes)", len(framed))
+	}
+	payload := framed[4:]
+
+	respBytes, err := p.forwardToBackend(probeCtx, conn, addr, payload)
+	if err != nil {
+		return fmt.Errorf("fetch probe forward to %s: %w", addr, err)
+	}
+	// Same decode path the proxy uses for real fetches (strips the response
+	// header, then kmsg ReadFrom). Returns the canonical "decode fetch response
+	// vN: not enough data" error in the BUG-0026 broken state.
+	if _, err := parseFetchResponse(respBytes, fetchVersion); err != nil {
+		return fmt.Errorf("fetch probe from %s: %w", addr, err)
+	}
+	return nil
 }
 
 func (p *proxy) initMetadataCache(ctx context.Context) {
