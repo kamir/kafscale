@@ -280,6 +280,54 @@ func TestInMemoryStoreTopicConfigAndPartitions(t *testing.T) {
 	}
 }
 
+// TestCreatePartitions_CountIsNewTotal_BUG0020 is the regression guard for
+// BUG-0020 (KafScale CreatePartitions(N) on an auto-created 1-partition topic
+// yielded N+1). Kafka protocol semantics: the request Count is the NEW TOTAL
+// partition count, not the number of partitions to ADD. The off-by-one was in
+// the pre-v1.6.0 rc2 broker image; this test pins the correct behaviour on the
+// current source so it cannot regress. The owed off-cluster proof is the
+// COMP_kafscale_create_partitions smoke + a master2 re-run (needs a live
+// cluster); this unit test is the in-process half.
+func TestCreatePartitions_CountIsNewTotal_BUG0020(t *testing.T) {
+	ctx := context.Background()
+	// Each case mirrors a topic auto-created with 1 partition on first Produce,
+	// then grown via CreatePartitions(total). Result must be exactly `total`.
+	for _, total := range []int32{2, 3, 6} {
+		store := NewInMemoryStore(ClusterMetadata{
+			Brokers: []protocol.MetadataBroker{{NodeID: 1}},
+		})
+		if _, err := store.CreateTopic(ctx, TopicSpec{Name: "orders", NumPartitions: 1, ReplicationFactor: 1}); err != nil {
+			t.Fatalf("CreateTopic: %v", err)
+		}
+		if err := store.CreatePartitions(ctx, "orders", total); err != nil {
+			t.Fatalf("CreatePartitions(%d): %v", total, err)
+		}
+		meta, err := store.Metadata(ctx, []string{"orders"})
+		if err != nil {
+			t.Fatalf("Metadata: %v", err)
+		}
+		got := int32(len(meta.Topics[0].Partitions))
+		if got != total {
+			t.Fatalf("CreatePartitions(%d) on a 1-partition topic: got %d partitions, want %d (BUG-0020 N+1 regression)", total, got, total)
+		}
+		cfg, err := store.FetchTopicConfig(ctx, "orders")
+		if err != nil {
+			t.Fatalf("FetchTopicConfig: %v", err)
+		}
+		if cfg.Partitions != total {
+			t.Fatalf("CreatePartitions(%d): config.Partitions=%d, want %d", total, cfg.Partitions, total)
+		}
+	}
+	// Lowering or equal count must be rejected (Kafka cannot reduce partitions).
+	store := NewInMemoryStore(ClusterMetadata{Brokers: []protocol.MetadataBroker{{NodeID: 1}}})
+	if _, err := store.CreateTopic(ctx, TopicSpec{Name: "p", NumPartitions: 3, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if err := store.CreatePartitions(ctx, "p", 3); err == nil {
+		t.Fatalf("CreatePartitions(3) on a 3-partition topic should be rejected (no-op/decrease)")
+	}
+}
+
 // --- Additional store tests for coverage gaps ---
 
 func TestFetchConsumerOffset(t *testing.T) {
