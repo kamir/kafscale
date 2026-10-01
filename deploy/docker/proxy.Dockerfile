@@ -21,6 +21,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -ldflags="-s -w" -o /out/proxy ./cmd/proxy
 
 FROM alpine:3.19@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1
+RUN apk upgrade --no-cache
 RUN apk add --no-cache ca-certificates && adduser -D -u 10001 kafscale
 USER 10001
 WORKDIR /app
