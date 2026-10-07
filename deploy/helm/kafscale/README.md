@@ -100,6 +100,7 @@ See [values.yaml](values.yaml) for the full list of configurable parameters.
 | Section | Description |
 |---------|-------------|
 | `operator.*` | KafScale operator settings |
+| `operator.watchNamespaces` | Namespaces the operator reconciles; empty means all namespaces with a `ClusterRole`, a list means one `Role` per namespace |
 | `console.*` | Console UI settings |
 | `proxy.*` | Kafka proxy settings (external entrypoint) |
 | `lfsDemos.*` | Optional LFS browser demo UI |
