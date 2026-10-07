@@ -54,8 +54,16 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	namespaces := operator.WatchNamespaces()
+	if len(namespaces) == 0 {
+		setupLog.Info("watching all namespaces")
+	} else {
+		setupLog.Info("watching a restricted set of namespaces", "namespaces", namespaces)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache:  operator.CacheOptions(namespaces),
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
