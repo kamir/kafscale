@@ -460,7 +460,7 @@ test-operator: docker-build ## Run operator envtest + kind snapshot e2e (require
 	fi; \
 	export KUBEBUILDER_ASSETS="$$( "$$SETUP_ENVTEST" use -p path 1.29.x )"; \
 	KAFSCALE_E2E=1 \
-	go test -tags=e2e ./test/e2e -run 'TestOperator(ManagedEtcdResources|BrokerExternalAccessConfig|WatchNamespaces)' -v
+	go test -tags=e2e ./test/e2e -run 'TestOperator(ManagedEtcdResources|BrokerExternalAccessConfig|WatchNamespaces|TwoReleasesShareCluster)' -v
 	KAFSCALE_E2E=1 \
 	KAFSCALE_E2E_KIND=1 \
 	KAFSCALE_KIND_RECREATE=1 \
