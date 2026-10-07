@@ -59,7 +59,7 @@ By default, image tags follow the chart `appVersion`. Override `operator.image.t
 
 ## Security & Hardening
 
-- **RBAC** – The Helm chart creates a scoped service account and RBAC role so the operator only touches its CRDs, Secrets, and Deployments inside the release namespace.
+- **RBAC** – The Helm chart creates a service account for the operator. By default the operator reconciles all namespaces and is bound to a `ClusterRole`. To limit it to chosen namespaces with a `Role` in each, see [Restricting the operator to namespaces](#restricting-the-operator-to-namespaces).
 - **S3 credentials** – Credentials live in user-managed Kubernetes secrets. The operator never writes them to etcd. Snapshot jobs map `KAFSCALE_S3_ACCESS_KEY`/`KAFSCALE_S3_SECRET_KEY` into the AWS CLI env vars (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) automatically.
 - **Console auth** – The UI requires `KAFSCALE_UI_USERNAME` and `KAFSCALE_UI_PASSWORD`. There are no defaults; if unset, the login screen shows a warning and the API blocks access. In Helm, set `console.auth.username` and `console.auth.password`, for example:
 
@@ -98,6 +98,39 @@ operator:
 - **Health / metrics** – Prometheus can scrape `/metrics` on the brokers and operator for early detection of S3 pressure or degraded nodes. The operator exposes metrics on port `8080` and the Helm chart can create a metrics Service, ServiceMonitor, and PrometheusRule.
 - **Startup gating** – Broker pods exit immediately if they cannot read metadata or write a probe object to S3 during startup, so Kubernetes restarts them rather than leaving a stuck listener in place.
 - **Leader IDs** – Each broker advertises a numeric `NodeID` in etcd. In the single-node demo you’ll always see `Leader=0` in the Console’s topic detail because the only broker has ID `0`. In real clusters those IDs align with the broker addresses the operator published; if you see `Leader=3`, look for the broker with `NodeID 3` in the metadata payload.
+
+### Restricting the operator to namespaces
+
+By default the operator reconciles `KafscaleCluster` and `KafscaleTopic`
+resources in every namespace and the chart grants it a `ClusterRole`. Set
+`operator.watchNamespaces` to limit it:
+
+```yaml
+operator:
+  watchNamespaces:
+    - kafscale
+```
+
+With a list set:
+
+- The operator only sees resources in the listed namespaces
+  (`KAFSCALE_OPERATOR_WATCH_NAMESPACES`). A `KafscaleCluster` or
+  `KafscaleTopic` in any other namespace is ignored. The operator logs the
+  watched namespaces at startup.
+- The chart renders a `Role` and a `RoleBinding` in each listed namespace
+  instead of the `ClusterRole` and `ClusterRoleBinding`. If the release
+  namespace is not in the list, it gets a small `Role` for leader election.
+- The listed namespaces must exist before `helm install`.
+
+Several operator releases can share one Kubernetes cluster when **every**
+release is restricted and no namespace appears in two lists. Each release then
+manages its own clusters with its own operator and broker versions. An
+unrestricted operator next to a restricted one is not supported: the
+unrestricted operator reconciles every resource, including those of the other
+release, and both would write their own broker image into the same StatefulSet.
+
+The two CRDs are cluster-scoped and shared by all releases. A CRD change
+affects every release on the cluster.
 
 ### Proxy TLS via LoadBalancer (Recommended)
 
@@ -345,6 +378,7 @@ the broker first, or do not gate the install on proxy readiness.
 - `KAFSCALE_OPERATOR_ETCD_SNAPSHOT_PROTECT_BUCKET` – Enable versioning + public access block (`1` to enable).
 - `KAFSCALE_OPERATOR_ETCD_SNAPSHOT_SKIP_PREFLIGHT` – Skip the S3 write preflight (`1` to enable).
 - `KAFSCALE_OPERATOR_LEADER_KEY` – Override the operator leader election ID (default `kafscale-operator`).
+- `KAFSCALE_OPERATOR_WATCH_NAMESPACES` – Comma-separated namespaces the operator reconciles (default: all namespaces). See [Restricting the operator to namespaces](#restricting-the-operator-to-namespaces).
 - `KAFSCALE_S3_NAMESPACE` – Prefix used for broker S3 object keys (defaults to the cluster namespace).
 - `KAFSCALE_SEGMENT_BYTES` – Broker segment flush threshold in bytes (default `4194304`).
 - `KAFSCALE_FLUSH_INTERVAL_MS` – Broker flush interval in milliseconds (default `500`).

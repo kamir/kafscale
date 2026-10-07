@@ -89,6 +89,10 @@ spec:
               value: "{{ join "," .Values.operator.etcdEndpoints }}"
             - name: KAFSCALE_OPERATOR_LEADER_KEY
               value: "{{ .Values.operator.leaderKey }}"
+{{- if .Values.operator.watchNamespaces }}
+            - name: KAFSCALE_OPERATOR_WATCH_NAMESPACES
+              value: "{{ join "," .Values.operator.watchNamespaces }}"
+{{- end }}
 {{- if .Values.operator.acl.enabled }}
             - name: KAFSCALE_ACL_ENABLED
               value: "true"
