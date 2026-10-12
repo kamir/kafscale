@@ -810,11 +810,11 @@ func (p *proxy) forwardProduce(ctx context.Context, header *protocol.RequestHead
 		tr := findOrAddTopicResponse(merged, topic.Topic)
 		for _, part := range topic.Partitions {
 			if failedParts[part.Partition] {
-				tr.Partitions = append(tr.Partitions, kmsg.ProduceResponseTopicPartition{
-					Partition:  part.Partition,
-					ErrorCode:  protocol.NOT_LEADER_OR_FOLLOWER,
-					BaseOffset: -1,
-				})
+				pr := kmsg.NewProduceResponseTopicPartition()
+				pr.Partition = part.Partition
+				pr.ErrorCode = protocol.NOT_LEADER_OR_FOLLOWER
+				pr.BaseOffset = -1
+				tr.Partitions = append(tr.Partitions, pr)
 			}
 		}
 	}
@@ -916,11 +916,11 @@ func addErrorForAllPartitions(resp *kmsg.ProduceResponse, req *kmsg.ProduceReque
 	for _, topic := range req.Topics {
 		topicResp := findOrAddTopicResponse(resp, topic.Topic)
 		for _, part := range topic.Partitions {
-			topicResp.Partitions = append(topicResp.Partitions, kmsg.ProduceResponseTopicPartition{
-				Partition:  part.Partition,
-				ErrorCode:  errorCode,
-				BaseOffset: -1,
-			})
+			pr := kmsg.NewProduceResponseTopicPartition()
+			pr.Partition = part.Partition
+			pr.ErrorCode = errorCode
+			pr.BaseOffset = -1
+			topicResp.Partitions = append(topicResp.Partitions, pr)
 		}
 	}
 }
@@ -1801,10 +1801,10 @@ func (p *proxy) forwardFetch(ctx context.Context, header *protocol.RequestHeader
 		tr := findOrAddFetchTopicResponse(merged, topic.Topic, topic.TopicID)
 		for _, part := range topic.Partitions {
 			if failedParts[part.Partition] {
-				tr.Partitions = append(tr.Partitions, kmsg.FetchResponseTopicPartition{
-					Partition: part.Partition,
-					ErrorCode: protocol.NOT_LEADER_OR_FOLLOWER,
-				})
+				fp := kmsg.NewFetchResponseTopicPartition()
+				fp.Partition = part.Partition
+				fp.ErrorCode = protocol.NOT_LEADER_OR_FOLLOWER
+				tr.Partitions = append(tr.Partitions, fp)
 			}
 		}
 	}
@@ -1889,10 +1889,10 @@ func addFetchErrorForAllPartitions(resp *kmsg.FetchResponse, req *kmsg.FetchRequ
 	for _, topic := range req.Topics {
 		tr := findOrAddFetchTopicResponse(resp, topic.Topic, topic.TopicID)
 		for _, part := range topic.Partitions {
-			tr.Partitions = append(tr.Partitions, kmsg.FetchResponseTopicPartition{
-				Partition: part.Partition,
-				ErrorCode: errorCode,
-			})
+			fp := kmsg.NewFetchResponseTopicPartition()
+			fp.Partition = part.Partition
+			fp.ErrorCode = errorCode
+			tr.Partitions = append(tr.Partitions, fp)
 		}
 	}
 }
