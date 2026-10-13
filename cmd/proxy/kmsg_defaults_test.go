@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,31 +28,21 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-// Response structs must be created with the generated New...() constructors, which apply
-// Default(). A Go struct literal leaves every field at the zero value, and kmsg decides
-// whether to emit a tagged field by comparing it against its default. A zero-valued
-// tagged field therefore counts as "set" and is written to the wire.
-//
-// For Produce that is fatal: the tagged field CurrentLeader is tag 0, kmsg gates it on
-// flexibility only (Produce is flexible from v9) while the Kafka schema defines it from
-// v10. A v9 response carrying tag 0 makes the Apache Kafka Java client throw
-// "Tag 0 is not valid for version 9" on the producer I/O thread, which is not
-// recoverable, so the client dies.
-//
-// Oracle: encode at v9, decode at v9. readFrom applies Default() per element, so a
-// CurrentLeader that comes back different from the default proves the tag crossed the wire.
+// kmsg writes a tagged field whenever it differs from its default, so structs with
+// a non-empty Default() must come from the generated constructors. The tests encode
+// and decode at the same version: a decoded value that differs from the default
+// proves the tag was on the wire.
 
-func TestProduceErrorResponseCarriesNoTaggedFieldsAtV9(t *testing.T) {
+func TestProduceErrorResponseHasNoTaggedFieldsAtV9(t *testing.T) {
 	const version int16 = 9
-
 	req := kmsg.NewPtrProduceRequest()
 	req.SetVersion(version)
 	topic := kmsg.NewProduceRequestTopic()
-	topic.Topic = "tsx.wind.series-stats.v2"
-	for _, p := range []int32{0, 1, 2} {
-		rp := kmsg.NewProduceRequestTopicPartition()
-		rp.Partition = p
-		topic.Partitions = append(topic.Partitions, rp)
+	topic.Topic = "orders"
+	for _, id := range []int32{0, 1, 2} {
+		part := kmsg.NewProduceRequestTopicPartition()
+		part.Partition = id
+		topic.Partitions = append(topic.Partitions, part)
 	}
 	req.Topics = append(req.Topics, topic)
 
@@ -59,16 +50,14 @@ func TestProduceErrorResponseCarriesNoTaggedFieldsAtV9(t *testing.T) {
 	resp.SetVersion(version)
 	addErrorForAllPartitions(resp, req, protocol.REQUEST_TIMED_OUT)
 
-	wire := protocol.EncodeResponse(7, version, resp)
-	body, ok := protocol.SkipResponseHeader(protocol.APIKeyProduce, version, wire)
+	body, ok := protocol.SkipResponseHeader(protocol.APIKeyProduce, version, protocol.EncodeResponse(7, version, resp))
 	if !ok {
 		t.Fatal("could not skip the response header")
 	}
-
 	decoded := kmsg.NewPtrProduceResponse()
 	decoded.SetVersion(version)
 	if err := decoded.ReadFrom(body); err != nil {
-		t.Fatalf("decode v%d produce response: %v", version, err)
+		t.Fatalf("decode: %v", err)
 	}
 
 	want := kmsg.NewProduceResponseTopicPartition().CurrentLeader
@@ -77,14 +66,7 @@ func TestProduceErrorResponseCarriesNoTaggedFieldsAtV9(t *testing.T) {
 		for _, p := range tp.Partitions {
 			parts++
 			if !reflect.DeepEqual(p.CurrentLeader, want) {
-				t.Errorf("topic %q partition %d: CurrentLeader crossed the wire as %+v, want the kmsg default %+v; "+
-					"tagged field 0 in a v9 ProduceResponse kills the Kafka Java client "+
-					"(\"Tag 0 is not valid for version 9\")", tp.Topic, p.Partition, p.CurrentLeader, want)
-			}
-			unknown := 0
-			p.UnknownTags.Each(func(uint32, []byte) { unknown++ })
-			if unknown != 0 {
-				t.Errorf("topic %q partition %d: %d unknown tagged field(s) on the wire, want 0", tp.Topic, p.Partition, unknown)
+				t.Errorf("partition %d: CurrentLeader = %+v, want %+v", p.Partition, p.CurrentLeader, want)
 			}
 		}
 	}
@@ -93,47 +75,109 @@ func TestProduceErrorResponseCarriesNoTaggedFieldsAtV9(t *testing.T) {
 	}
 }
 
-func TestFetchErrorPartitionKeepsKmsgDefaults(t *testing.T) {
-	// FetchResponseTopicPartition has three tagged fields (DivergingEpoch, CurrentLeader,
-	// SnapshotID) plus three scalars that default to -1. A literal silently turns
-	// PreferredReadReplica into 0, which tells the client to fetch from broker 0.
-	def := kmsg.NewFetchResponseTopicPartition()
+func TestFetchErrorPartitionsKeepDefaults(t *testing.T) {
+	req := kmsg.NewPtrFetchRequest()
+	req.SetVersion(12)
+	topic := kmsg.NewFetchRequestTopic()
+	topic.Topic = "orders"
+	part := kmsg.NewFetchRequestTopicPartition()
+	part.Partition = 3
+	topic.Partitions = append(topic.Partitions, part)
+	req.Topics = append(req.Topics, topic)
 
-	got := newFetchErrorPartition(11, protocol.REQUEST_TIMED_OUT)
+	resp := kmsg.NewPtrFetchResponse()
+	resp.SetVersion(12)
+	addFetchErrorForAllPartitions(resp, req, protocol.REQUEST_TIMED_OUT)
 
-	if !reflect.DeepEqual(got.DivergingEpoch, def.DivergingEpoch) {
-		t.Errorf("DivergingEpoch = %+v, want the default %+v", got.DivergingEpoch, def.DivergingEpoch)
-	}
-	if !reflect.DeepEqual(got.CurrentLeader, def.CurrentLeader) {
-		t.Errorf("CurrentLeader = %+v, want the default %+v", got.CurrentLeader, def.CurrentLeader)
-	}
-	if !reflect.DeepEqual(got.SnapshotID, def.SnapshotID) {
-		t.Errorf("SnapshotID = %+v, want the default %+v", got.SnapshotID, def.SnapshotID)
-	}
-	if got.PreferredReadReplica != def.PreferredReadReplica {
-		t.Errorf("PreferredReadReplica = %d, want the default %d (0 means \"fetch from broker 0\")",
-			got.PreferredReadReplica, def.PreferredReadReplica)
-	}
-	if got.LastStableOffset != def.LastStableOffset {
-		t.Errorf("LastStableOffset = %d, want the default %d", got.LastStableOffset, def.LastStableOffset)
-	}
-	if got.LogStartOffset != def.LogStartOffset {
-		t.Errorf("LogStartOffset = %d, want the default %d", got.LogStartOffset, def.LogStartOffset)
+	want := kmsg.NewFetchResponseTopicPartition()
+	want.Partition = 3
+	want.ErrorCode = protocol.REQUEST_TIMED_OUT
+	if got := resp.Topics[0].Partitions[0]; !reflect.DeepEqual(got, want) {
+		t.Errorf("error partition = %+v, want %+v", got, want)
 	}
 }
 
-// TestNoKmsgStructLiteralsWithDefaults keeps the bug from coming back, on both sides of
-// the wire. A kmsg request or response struct whose Default() is non-empty must not be
-// built as a literal. Checked by source scan, because the defect is invisible at compile
-// time and only shows on the wire.
-//
-// Two forms are caught: the plain literal `kmsg.X{...}`, and a slice literal with elided
-// element types, `[]kmsg.X{{...}}`, which builds the same zero-valued elements. A slice
-// of values that were constructed elsewhere, `[]kmsg.X{a, b}`, is fine and not flagged.
-func TestNoKmsgStructLiteralsWithDefaults(t *testing.T) {
-	// Structs whose Default() is empty; a literal cannot lose anything there. Each entry
-	// carries an instance so the claim is checked below instead of trusted.
-	emptyDefaults := map[string]interface{ Default() }{
+func fetchRequestForSplit(version int16) *kmsg.FetchRequest {
+	req := kmsg.NewPtrFetchRequest()
+	req.SetVersion(version)
+	req.MaxWaitMillis = 500
+	req.MinBytes = 1
+	req.MaxBytes = 1 << 20
+	req.IsolationLevel = 1
+	topic := kmsg.NewFetchRequestTopic()
+	topic.Topic = "orders"
+	for _, id := range []int32{0, 1} {
+		part := kmsg.NewFetchRequestTopicPartition()
+		part.Partition = id
+		part.FetchOffset = 42
+		topic.Partitions = append(topic.Partitions, part)
+	}
+	req.Topics = append(req.Topics, topic)
+	return req
+}
+
+func TestFetchSubRequestHasNoTaggedFields(t *testing.T) {
+	want := kmsg.NewFetchRequest().ReplicaState
+	for _, version := range []int16{12, 13} {
+		req := fetchRequestForSplit(version)
+		groups := (&proxy{}).groupFetchPartitionsByBroker(context.Background(), req, nil)
+		if len(groups) != 1 {
+			t.Fatalf("v%d: got %d groups, want 1", version, len(groups))
+		}
+		for _, sub := range groups {
+			decoded := kmsg.NewPtrFetchRequest()
+			decoded.SetVersion(version)
+			if err := decoded.ReadFrom(sub.AppendTo(nil)); err != nil {
+				t.Fatalf("v%d: decode: %v", version, err)
+			}
+			if !reflect.DeepEqual(decoded.ReplicaState, want) {
+				t.Errorf("v%d: ReplicaState = %+v, want %+v", version, decoded.ReplicaState, want)
+			}
+		}
+	}
+}
+
+func TestSubRequestsKeepClientFields(t *testing.T) {
+	fetch := fetchRequestForSplit(13)
+	for _, sub := range (&proxy{}).groupFetchPartitionsByBroker(context.Background(), fetch, nil) {
+		if sub.Version != fetch.Version || sub.ReplicaID != fetch.ReplicaID ||
+			sub.MaxWaitMillis != fetch.MaxWaitMillis || sub.MinBytes != fetch.MinBytes ||
+			sub.MaxBytes != fetch.MaxBytes || sub.IsolationLevel != fetch.IsolationLevel ||
+			sub.SessionID != fetch.SessionID || sub.SessionEpoch != fetch.SessionEpoch {
+			t.Errorf("fetch sub-request differs from the client request: %+v", sub)
+		}
+		if !reflect.DeepEqual(sub.Topics[0].Partitions, fetch.Topics[0].Partitions) {
+			t.Errorf("fetch partitions changed: %+v", sub.Topics[0].Partitions)
+		}
+	}
+
+	txn := "txn-1"
+	produce := kmsg.NewPtrProduceRequest()
+	produce.SetVersion(9)
+	produce.Acks = -1
+	produce.TimeoutMillis = 4321
+	produce.TransactionID = &txn
+	topic := kmsg.NewProduceRequestTopic()
+	topic.Topic = "orders"
+	part := kmsg.NewProduceRequestTopicPartition()
+	part.Partition = 3
+	topic.Partitions = append(topic.Partitions, part)
+	produce.Topics = append(produce.Topics, topic)
+	for _, sub := range (&proxy{}).groupPartitionsByBroker(context.Background(), produce, nil) {
+		if sub.Version != 9 || sub.Acks != -1 || sub.TimeoutMillis != 4321 || sub.TransactionID != &txn {
+			t.Errorf("produce sub-request differs from the client request: %+v", sub)
+		}
+		if len(sub.Topics) != 1 || len(sub.Topics[0].Partitions) != 1 || sub.Topics[0].Partitions[0].Partition != 3 {
+			t.Errorf("produce partitions changed: %+v", sub.Topics)
+		}
+	}
+}
+
+// TestNoKmsgLiteralsWithDefaults scans non-test code for kmsg request and response
+// literals. Only structs with an empty Default() may be built that way, and the
+// list of those is checked by reflection.
+func TestNoKmsgLiteralsWithDefaults(t *testing.T) {
+	emptyDefault := map[string]interface{ Default() }{
 		"ProduceResponse":              &kmsg.ProduceResponse{},
 		"ProduceResponseTopic":         &kmsg.ProduceResponseTopic{},
 		"FetchResponse":                &kmsg.FetchResponse{},
@@ -144,53 +188,41 @@ func TestNoKmsgStructLiteralsWithDefaults(t *testing.T) {
 		"ProduceRequestTopicPartition": &kmsg.ProduceRequestTopicPartition{},
 		"FetchRequestTopic":            &kmsg.FetchRequestTopic{},
 	}
-	// The allow-list must stay true. A kmsg upgrade that gives one of these structs a
-	// default would otherwise hide behind the list.
-	for name, zero := range emptyDefaults {
+	for name, zero := range emptyDefault {
 		typ := reflect.TypeOf(zero).Elem()
 		defaulted := reflect.New(typ)
 		defaulted.Interface().(interface{ Default() }).Default()
 		if !reflect.DeepEqual(reflect.Zero(typ).Interface(), defaulted.Elem().Interface()) {
-			t.Errorf("kmsg.%s is listed as having an empty Default(), but Default() changes it to %+v; "+
-				"take it off the list and build it with kmsg.New%s()", name, defaulted.Elem().Interface(), name)
+			t.Errorf("kmsg.%s has a non-empty Default(); remove it from the list", name)
 		}
 	}
 
 	const name = `([A-Z][A-Za-z]*(?:Request|Response)[A-Za-z]*)`
 	plain := regexp.MustCompile(`(?:^|[^\]])kmsg\.` + name + `\{`)
-	elided := regexp.MustCompile(`\[\]kmsg\.` + name + `\{\s*\{`)
+	elided := regexp.MustCompile(`\[\]kmsg\.` + name + `\{\s*\{`) // []kmsg.X{{...}}
 
-	root := filepath.Join("..", "..")
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(filepath.Join("..", ".."), func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		b, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
 		}
-		for i, line := range strings.Split(string(b), "\n") {
-			var found []string
-			for _, m := range plain.FindAllStringSubmatch(line, -1) {
-				found = append(found, m[1])
-			}
-			for _, m := range elided.FindAllStringSubmatch(line, -1) {
-				found = append(found, m[1])
-			}
-			for _, name := range found {
-				if _, ok := emptyDefaults[name]; ok {
-					continue
+		for i, line := range strings.Split(string(src), "\n") {
+			matches := append(plain.FindAllStringSubmatch(line, -1), elided.FindAllStringSubmatch(line, -1)...)
+			for _, m := range matches {
+				if _, ok := emptyDefault[m[1]]; !ok {
+					t.Errorf("%s:%d: kmsg.%s built as a literal, use kmsg.New%s()", path, i+1, m[1], m[1])
 				}
-				t.Errorf("%s:%d builds kmsg.%s as a struct literal, so Default() never runs; "+
-					"use kmsg.New%s() and assign the fields", path, i+1, name, name)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk: %v", err)
+		t.Fatal(err)
 	}
 }
