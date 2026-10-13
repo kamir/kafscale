@@ -847,12 +847,7 @@ func (p *proxy) groupPartitionsByBroker(ctx context.Context, req *kmsg.ProduceRe
 			}
 			subReq, ok := groups[addr]
 			if !ok {
-				subReq = &kmsg.ProduceRequest{
-					Version:       req.Version,
-					Acks:          req.Acks,
-					TimeoutMillis: req.TimeoutMillis,
-					TransactionID: req.TransactionID,
-				}
+				subReq = newProduceSubRequest(req)
 				groups[addr] = subReq
 				topicIndices[addr] = make(map[string]int)
 			}
@@ -1787,16 +1782,7 @@ func (p *proxy) groupFetchPartitionsByBroker(ctx context.Context, req *kmsg.Fetc
 			}
 			subReq, ok := groups[addr]
 			if !ok {
-				subReq = &kmsg.FetchRequest{
-					Version:        req.Version,
-					ReplicaID:      req.ReplicaID,
-					MaxWaitMillis:  req.MaxWaitMillis,
-					MinBytes:       req.MinBytes,
-					MaxBytes:       req.MaxBytes,
-					IsolationLevel: req.IsolationLevel,
-					SessionID:      req.SessionID,
-					SessionEpoch:   req.SessionEpoch,
-				}
+				subReq = newFetchSubRequest(req)
 				groups[addr] = subReq
 				topicIndices[addr] = make(map[string]int)
 			}
@@ -2027,6 +2013,41 @@ func newFetchErrorPartition(partition int32, errorCode int16) kmsg.FetchResponse
 	p.Partition = partition
 	p.ErrorCode = errorCode
 	return p
+}
+
+// newProduceSubRequest starts the per-broker part of a client's produce request.
+//
+// Built with the generated constructor, never as a struct literal, for the same reason as
+// the error partitions above: Default() must run. For Produce a literal lost nothing,
+// TimeoutMillis is the only non-zero default and it is assigned here, but it would have
+// hidden the next default kmsg adds.
+func newProduceSubRequest(req *kmsg.ProduceRequest) *kmsg.ProduceRequest {
+	sub := kmsg.NewPtrProduceRequest()
+	sub.Version = req.Version
+	sub.Acks = req.Acks
+	sub.TimeoutMillis = req.TimeoutMillis
+	sub.TransactionID = req.TransactionID
+	return sub
+}
+
+// newFetchSubRequest starts the per-broker part of a client's fetch request.
+//
+// Here a literal did lose something: ReplicaState, tagged field 1, defaults to
+// {ID: -1, Epoch: -1}. A literal left it at {0, 0}, kmsg writes a tagged field whenever
+// it differs from its default, and so every flexible sub-request (Fetch v12 and later)
+// told the broker the fetch came from replica 0. The Kafka schema defines the field from
+// v15. The fields copied are the ones the proxy forwarded before; nothing else changes.
+func newFetchSubRequest(req *kmsg.FetchRequest) *kmsg.FetchRequest {
+	sub := kmsg.NewPtrFetchRequest()
+	sub.Version = req.Version
+	sub.ReplicaID = req.ReplicaID
+	sub.MaxWaitMillis = req.MaxWaitMillis
+	sub.MinBytes = req.MinBytes
+	sub.MaxBytes = req.MaxBytes
+	sub.IsolationLevel = req.IsolationLevel
+	sub.SessionID = req.SessionID
+	sub.SessionEpoch = req.SessionEpoch
+	return sub
 }
 
 func addFetchErrorForAllPartitions(resp *kmsg.FetchResponse, req *kmsg.FetchRequest, errorCode int16) {
