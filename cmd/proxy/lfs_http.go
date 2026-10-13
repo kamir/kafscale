@@ -1188,9 +1188,7 @@ func lfsGetClientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// newLfsProduceRequest builds the produce request that carries one LFS pointer record.
-// Built with the generated constructor so that Default() runs, like every other kmsg
-// request and response in the proxy.
+// newLfsProduceRequest returns the produce request for one LFS pointer record.
 func newLfsProduceRequest(topic string, partition int32, records []byte) *kmsg.ProduceRequest {
 	req := kmsg.NewPtrProduceRequest()
 	req.Acks = 1

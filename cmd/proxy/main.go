@@ -1986,14 +1986,10 @@ func findOrAddFetchTopicResponse(resp *kmsg.FetchResponse, name string, topicID 
 	return &resp.Topics[len(resp.Topics)-1]
 }
 
-// newProduceErrorPartition builds an error entry for one produce partition.
-//
-// Built with the generated constructor, never as a struct literal. A literal leaves every
-// field at the Go zero value, while Default() sets some of them to -1, and kmsg emits a
-// tagged field whenever it differs from its default. CurrentLeader is tag 0, gated on
-// flexibility only, and Produce is flexible from v9 while the Kafka schema defines the
-// field from v10. A literal therefore puts tag 0 into a v9 response, and the Apache Kafka
-// Java client fails it with "Tag 0 is not valid for version 9" on the producer I/O thread.
+// newProduceErrorPartition returns an error entry for one produce partition.
+// It must use the kmsg constructor: a struct literal skips Default(), leaves the
+// tagged CurrentLeader at {0, 0}, and kmsg then writes tag 0 into a v9 response,
+// which the Java client rejects.
 func newProduceErrorPartition(partition int32, errorCode int16) kmsg.ProduceResponseTopicPartition {
 	p := kmsg.NewProduceResponseTopicPartition()
 	p.Partition = partition
@@ -2002,12 +1998,8 @@ func newProduceErrorPartition(partition int32, errorCode int16) kmsg.ProduceResp
 	return p
 }
 
-// newFetchErrorPartition builds an error entry for one fetch partition.
-//
-// Same reason as newProduceErrorPartition, and more fields are at stake: Default() sets
-// the tagged fields DivergingEpoch, CurrentLeader and SnapshotID plus LastStableOffset,
-// LogStartOffset and PreferredReadReplica to -1. A literal would also claim
-// PreferredReadReplica 0, which points the client at broker 0.
+// newFetchErrorPartition returns an error entry for one fetch partition with the
+// kmsg defaults: offsets and preferred replica at -1, no tagged fields.
 func newFetchErrorPartition(partition int32, errorCode int16) kmsg.FetchResponseTopicPartition {
 	p := kmsg.NewFetchResponseTopicPartition()
 	p.Partition = partition
@@ -2015,12 +2007,7 @@ func newFetchErrorPartition(partition int32, errorCode int16) kmsg.FetchResponse
 	return p
 }
 
-// newProduceSubRequest starts the per-broker part of a client's produce request.
-//
-// Built with the generated constructor, never as a struct literal, for the same reason as
-// the error partitions above: Default() must run. For Produce a literal lost nothing,
-// TimeoutMillis is the only non-zero default and it is assigned here, but it would have
-// hidden the next default kmsg adds.
+// newProduceSubRequest returns the per-broker part of a produce request.
 func newProduceSubRequest(req *kmsg.ProduceRequest) *kmsg.ProduceRequest {
 	sub := kmsg.NewPtrProduceRequest()
 	sub.Version = req.Version
@@ -2030,13 +2017,8 @@ func newProduceSubRequest(req *kmsg.ProduceRequest) *kmsg.ProduceRequest {
 	return sub
 }
 
-// newFetchSubRequest starts the per-broker part of a client's fetch request.
-//
-// Here a literal did lose something: ReplicaState, tagged field 1, defaults to
-// {ID: -1, Epoch: -1}. A literal left it at {0, 0}, kmsg writes a tagged field whenever
-// it differs from its default, and so every flexible sub-request (Fetch v12 and later)
-// told the broker the fetch came from replica 0. The Kafka schema defines the field from
-// v15. The fields copied are the ones the proxy forwarded before; nothing else changes.
+// newFetchSubRequest returns the per-broker part of a fetch request. The constructor
+// keeps ReplicaState at its default, so it is not sent as a tagged field.
 func newFetchSubRequest(req *kmsg.FetchRequest) *kmsg.FetchRequest {
 	sub := kmsg.NewPtrFetchRequest()
 	sub.Version = req.Version
