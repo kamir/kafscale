@@ -44,6 +44,13 @@ operator:
   etcdEndpoints:
     - "http://etcd:2379"
   leaderKey: "kafscale-operator"
+  # Namespaces the operator reconciles. Empty means every namespace, with a
+  # ClusterRole. When set, the operator only sees KafscaleCluster and
+  # KafscaleTopic resources in these namespaces and the chart grants a Role in
+  # each of them instead of the ClusterRole. The namespaces must exist before
+  # the chart is installed. Several operators can share a cluster only when
+  # every one of them is restricted and no namespace is listed twice.
+  watchNamespaces: []
   acl:
     enabled: false
     configJson: ""
