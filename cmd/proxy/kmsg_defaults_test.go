@@ -122,17 +122,43 @@ func TestFetchErrorPartitionKeepsKmsgDefaults(t *testing.T) {
 	}
 }
 
-// TestNoKmsgResponseStructLiterals keeps the bug from coming back. kmsg response structs
-// whose Default() is non-empty must not be built as literals. Checked by source scan,
-// because the defect is invisible at compile time and only shows on the wire.
-func TestNoKmsgResponseStructLiterals(t *testing.T) {
-	// Structs whose Default() is empty; a literal cannot lose anything there.
-	emptyDefaults := map[string]bool{
-		"ProduceResponse": true, "ProduceResponseTopic": true,
-		"FetchResponse": true, "FetchResponseTopic": true,
-		"ApiVersionsResponseApiKey": true, "JoinGroupResponseMember": true,
+// TestNoKmsgStructLiteralsWithDefaults keeps the bug from coming back, on both sides of
+// the wire. A kmsg request or response struct whose Default() is non-empty must not be
+// built as a literal. Checked by source scan, because the defect is invisible at compile
+// time and only shows on the wire.
+//
+// Two forms are caught: the plain literal `kmsg.X{...}`, and a slice literal with elided
+// element types, `[]kmsg.X{{...}}`, which builds the same zero-valued elements. A slice
+// of values that were constructed elsewhere, `[]kmsg.X{a, b}`, is fine and not flagged.
+func TestNoKmsgStructLiteralsWithDefaults(t *testing.T) {
+	// Structs whose Default() is empty; a literal cannot lose anything there. Each entry
+	// carries an instance so the claim is checked below instead of trusted.
+	emptyDefaults := map[string]interface{ Default() }{
+		"ProduceResponse":              &kmsg.ProduceResponse{},
+		"ProduceResponseTopic":         &kmsg.ProduceResponseTopic{},
+		"FetchResponse":                &kmsg.FetchResponse{},
+		"FetchResponseTopic":           &kmsg.FetchResponseTopic{},
+		"ApiVersionsResponseApiKey":    &kmsg.ApiVersionsResponseApiKey{},
+		"JoinGroupResponseMember":      &kmsg.JoinGroupResponseMember{},
+		"ProduceRequestTopic":          &kmsg.ProduceRequestTopic{},
+		"ProduceRequestTopicPartition": &kmsg.ProduceRequestTopicPartition{},
+		"FetchRequestTopic":            &kmsg.FetchRequestTopic{},
 	}
-	literal := regexp.MustCompile(`kmsg\.([A-Za-z]*Response[A-Za-z]*)\{`)
+	// The allow-list must stay true. A kmsg upgrade that gives one of these structs a
+	// default would otherwise hide behind the list.
+	for name, zero := range emptyDefaults {
+		typ := reflect.TypeOf(zero).Elem()
+		defaulted := reflect.New(typ)
+		defaulted.Interface().(interface{ Default() }).Default()
+		if !reflect.DeepEqual(reflect.Zero(typ).Interface(), defaulted.Elem().Interface()) {
+			t.Errorf("kmsg.%s is listed as having an empty Default(), but Default() changes it to %+v; "+
+				"take it off the list and build it with kmsg.New%s()", name, defaulted.Elem().Interface(), name)
+		}
+	}
+
+	const name = `([A-Z][A-Za-z]*(?:Request|Response)[A-Za-z]*)`
+	plain := regexp.MustCompile(`(?:^|[^\]])kmsg\.` + name + `\{`)
+	elided := regexp.MustCompile(`\[\]kmsg\.` + name + `\{\s*\{`)
 
 	root := filepath.Join("..", "..")
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -147,9 +173,15 @@ func TestNoKmsgResponseStructLiterals(t *testing.T) {
 			return readErr
 		}
 		for i, line := range strings.Split(string(b), "\n") {
-			for _, m := range literal.FindAllStringSubmatch(line, -1) {
-				name := m[1]
-				if emptyDefaults[name] {
+			var found []string
+			for _, m := range plain.FindAllStringSubmatch(line, -1) {
+				found = append(found, m[1])
+			}
+			for _, m := range elided.FindAllStringSubmatch(line, -1) {
+				found = append(found, m[1])
+			}
+			for _, name := range found {
+				if _, ok := emptyDefaults[name]; ok {
 					continue
 				}
 				t.Errorf("%s:%d builds kmsg.%s as a struct literal, so Default() never runs; "+
