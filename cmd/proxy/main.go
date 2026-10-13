@@ -810,11 +810,7 @@ func (p *proxy) forwardProduce(ctx context.Context, header *protocol.RequestHead
 		tr := findOrAddTopicResponse(merged, topic.Topic)
 		for _, part := range topic.Partitions {
 			if failedParts[part.Partition] {
-				tr.Partitions = append(tr.Partitions, kmsg.ProduceResponseTopicPartition{
-					Partition:  part.Partition,
-					ErrorCode:  protocol.NOT_LEADER_OR_FOLLOWER,
-					BaseOffset: -1,
-				})
+				tr.Partitions = append(tr.Partitions, newProduceErrorPartition(part.Partition, protocol.NOT_LEADER_OR_FOLLOWER))
 			}
 		}
 	}
@@ -916,11 +912,7 @@ func addErrorForAllPartitions(resp *kmsg.ProduceResponse, req *kmsg.ProduceReque
 	for _, topic := range req.Topics {
 		topicResp := findOrAddTopicResponse(resp, topic.Topic)
 		for _, part := range topic.Partitions {
-			topicResp.Partitions = append(topicResp.Partitions, kmsg.ProduceResponseTopicPartition{
-				Partition:  part.Partition,
-				ErrorCode:  errorCode,
-				BaseOffset: -1,
-			})
+			topicResp.Partitions = append(topicResp.Partitions, newProduceErrorPartition(part.Partition, errorCode))
 		}
 	}
 }
@@ -1801,10 +1793,7 @@ func (p *proxy) forwardFetch(ctx context.Context, header *protocol.RequestHeader
 		tr := findOrAddFetchTopicResponse(merged, topic.Topic, topic.TopicID)
 		for _, part := range topic.Partitions {
 			if failedParts[part.Partition] {
-				tr.Partitions = append(tr.Partitions, kmsg.FetchResponseTopicPartition{
-					Partition: part.Partition,
-					ErrorCode: protocol.NOT_LEADER_OR_FOLLOWER,
-				})
+				tr.Partitions = append(tr.Partitions, newFetchErrorPartition(part.Partition, protocol.NOT_LEADER_OR_FOLLOWER))
 			}
 		}
 	}
@@ -1885,14 +1874,40 @@ func findOrAddFetchTopicResponse(resp *kmsg.FetchResponse, name string, topicID 
 	return &resp.Topics[len(resp.Topics)-1]
 }
 
+// newProduceErrorPartition builds an error entry for one produce partition.
+//
+// Built with the generated constructor, never as a struct literal. A literal leaves every
+// field at the Go zero value, while Default() sets some of them to -1, and kmsg emits a
+// tagged field whenever it differs from its default. CurrentLeader is tag 0, gated on
+// flexibility only, and Produce is flexible from v9 while the Kafka schema defines the
+// field from v10. A literal therefore puts tag 0 into a v9 response, and the Apache Kafka
+// Java client fails it with "Tag 0 is not valid for version 9" on the producer I/O thread.
+func newProduceErrorPartition(partition int32, errorCode int16) kmsg.ProduceResponseTopicPartition {
+	p := kmsg.NewProduceResponseTopicPartition()
+	p.Partition = partition
+	p.ErrorCode = errorCode
+	p.BaseOffset = -1
+	return p
+}
+
+// newFetchErrorPartition builds an error entry for one fetch partition.
+//
+// Same reason as newProduceErrorPartition, and more fields are at stake: Default() sets
+// the tagged fields DivergingEpoch, CurrentLeader and SnapshotID plus LastStableOffset,
+// LogStartOffset and PreferredReadReplica to -1. A literal would also claim
+// PreferredReadReplica 0, which points the client at broker 0.
+func newFetchErrorPartition(partition int32, errorCode int16) kmsg.FetchResponseTopicPartition {
+	p := kmsg.NewFetchResponseTopicPartition()
+	p.Partition = partition
+	p.ErrorCode = errorCode
+	return p
+}
+
 func addFetchErrorForAllPartitions(resp *kmsg.FetchResponse, req *kmsg.FetchRequest, errorCode int16) {
 	for _, topic := range req.Topics {
 		tr := findOrAddFetchTopicResponse(resp, topic.Topic, topic.TopicID)
 		for _, part := range topic.Partitions {
-			tr.Partitions = append(tr.Partitions, kmsg.FetchResponseTopicPartition{
-				Partition: part.Partition,
-				ErrorCode: errorCode,
-			})
+			tr.Partitions = append(tr.Partitions, newFetchErrorPartition(part.Partition, errorCode))
 		}
 	}
 }
