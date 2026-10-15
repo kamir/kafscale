@@ -274,7 +274,7 @@ func TestPartitionLogPrefetchSkippedWhenSemaphoreFull(t *testing.T) {
 	}
 	_ = sem.Acquire(context.Background(), 1) // re-exhaust
 
-	// Trigger prefetch — should be skipped because TryAcquire fails.
+	// Trigger prefetch; it should be skipped because TryAcquire fails.
 	reader.startPrefetch(context.Background(), 0)
 	time.Sleep(5 * time.Millisecond)
 
@@ -297,7 +297,7 @@ func TestPartitionLogFlushWaitsForInflight(t *testing.T) {
 	flushCh := make(chan int64, 4)
 	log := NewPartitionLog("default", "orders", 0, 0, slowS3, nil, PartitionLogConfig{
 		Buffer: WriteBufferConfig{
-			MaxBytes: 1 << 20, // large — manual flush only
+			MaxBytes: 1 << 20, // large, manual flush only
 		},
 		Segment: SegmentWriterConfig{
 			IndexIntervalMessages: 1,
@@ -323,14 +323,14 @@ func TestPartitionLogFlushWaitsForInflight(t *testing.T) {
 		t.Fatalf("AppendBatch 1: %v", err)
 	}
 
-	// Start second Flush — it must block until first completes.
+	// Start second Flush; it must block until first completes.
 	errCh2 := make(chan error, 1)
 	go func() {
 		errCh2 <- log.Flush(context.Background())
 	}()
 	time.Sleep(5 * time.Millisecond) // give second Flush time to reach the wait
 
-	// Release the slow upload — both flushes should complete.
+	// Release the slow upload; both flushes should complete.
 	close(uploadRelease)
 
 	if err := <-errCh; err != nil {
@@ -499,7 +499,7 @@ func TestPartitionLogRestoreFromS3TransientErrorPropagates(t *testing.T) {
 
 	// The segment's baseOffset (0) >= nextOffset (0), so the offset condition
 	// for orphan-skip is satisfied. But the error is not ErrNotFound, so the
-	// skip must not trigger — we can't tell if .index is missing or S3 is down.
+	// skip must not trigger: we can't tell if .index is missing or S3 is down.
 	recovered := NewPartitionLog("default", "orders", 0, 0, transientS3, c, PartitionLogConfig{
 		Buffer: WriteBufferConfig{
 			MaxBytes:      1,

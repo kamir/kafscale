@@ -403,8 +403,8 @@ paths:
           storage while computing SHA-256, then verifies the digest against
           the client-supplied envelope checksum. **Only on a successful match
           are the bytes streamed to the client** (200 OK with `Content-Length`
-          set to the verified size). On mismatch — or if the S3 response
-          exceeds the envelope-declared size — the proxy returns 502 with
+          set to the verified size). On mismatch, or if the S3 response
+          exceeds the envelope-declared size, the proxy returns 502 with
           `code: integrity_failure` and no payload bytes ever reach the
           client. An `integrity_failure` event is emitted to the LFS ops
           tracker topic for operator alerting.

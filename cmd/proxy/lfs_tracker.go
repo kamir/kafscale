@@ -364,7 +364,7 @@ func (t *LfsOpsTracker) EmitDownloadCompleted(requestID, s3Key, mode string, dur
 
 // EmitDownloadIntegrityFailed emits a download-integrity-failure event. This
 // signals that bytes fetched from S3 did not match the client-supplied envelope
-// checksum — i.e. tampering, a compromised bucket, or a stale envelope.
+// checksum, i.e. tampering, a compromised bucket, or a stale envelope.
 func (t *LfsOpsTracker) EmitDownloadIntegrityFailed(requestID, s3Bucket, s3Key, mode, checksumAlg, expectedSHA256, actualSHA256 string, bytesRead, expectedSize int64) {
 	if !t.IsEnabled() {
 		return

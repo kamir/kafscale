@@ -623,7 +623,7 @@ func TestHandleHTTPDownload_PresignMode(t *testing.T) {
 func TestHandleHTTPDownload_PresignDisabledByDefault(t *testing.T) {
 	m := testHTTPModule(t)
 	m.httpAPIKey = ""
-	// presignEnabled defaults to false — do not override
+	// presignEnabled defaults to false; do not override
 
 	body, _ := json.Marshal(lfsDownloadRequest{
 		Bucket: "test-bucket",
@@ -779,7 +779,7 @@ func TestHandleHTTPDownload_StreamVerifyMismatch_ReturnsErrorJSON(t *testing.T) 
 func TestHandleHTTPDownload_DefaultModeIsStream(t *testing.T) {
 	m := testHTTPModule(t)
 	m.httpAPIKey = ""
-	// presignEnabled stays false — default mode must be stream, not presign,
+	// presignEnabled stays false: default mode must be stream, not presign,
 	// otherwise requests without explicit mode would hit presign_disabled.
 
 	// Provide a real envelope (sha + size). Stream mode now requires Size,
@@ -1845,7 +1845,7 @@ func TestStreamVerify_ContentLengthSetOnlyAfterVerification(t *testing.T) {
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("regression: 200 OK on integrity mismatch")
 	}
-	// On the error response the body is the JSON error envelope — its size
+	// On the error response the body is the JSON error envelope; its size
 	// is small and NOT declaredSize. If Content-Length somehow equals
 	// declaredSize a future regression has reintroduced the leak.
 	if cl := resp.Header.Get("Content-Length"); cl == strconv.Itoa(declaredSize) {

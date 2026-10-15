@@ -429,7 +429,7 @@ Consider native S3-compatible providers if Azure isn't a hard requirement.
 
 ## MinIO (Self-Hosted)
 
-Run your own S3-compatible storage on any infrastructure—on-prem, edge, or any cloud.
+Run your own S3-compatible storage on any infrastructure: on-prem, edge, or any cloud.
 
 ### Docker Compose (Development)
 
@@ -491,7 +491,7 @@ Place your storage in the same region as your Kubernetes cluster. KafScale's ~50
 
 ### Bucket Lifecycle
 
-KafScale manages segment files in `.kfs` format. Configure bucket lifecycle policies carefully—avoid auto-deletion rules that could remove active segments.
+KafScale manages segment files in `.kfs` format. Configure bucket lifecycle policies carefully and avoid auto-deletion rules that could remove active segments.
 
 ### Testing Your Backend
 

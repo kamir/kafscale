@@ -156,7 +156,7 @@ func TestGracefulReleaseImmediate(t *testing.T) {
 
 // Scenario 4: Reacquire after restart.
 // Broker A acquires, its session dies but the old lease key still has broker A's ID.
-// Broker A reconnects and acquires again — should succeed via reacquire path.
+// Broker A reconnects and acquires again; should succeed via reacquire path.
 func TestReacquireAfterRestart(t *testing.T) {
 	endpoints := testutil.StartEmbeddedEtcd(t)
 

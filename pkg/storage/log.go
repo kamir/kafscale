@@ -479,7 +479,7 @@ func (l *PartitionLog) Read(ctx context.Context, offset int64, maxBytes int32) (
 			entries = l.indexEntries[s.baseOffset]
 			break
 		}
-		// Offset falls in a gap before this segment — snap forward.
+		// Offset falls in a gap before this segment, snap forward.
 		if s.baseOffset > offset {
 			seg = s
 			found = true

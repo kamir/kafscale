@@ -46,7 +46,7 @@ After the chart is running you can create a cluster by applying a `KafscaleClust
 `proxy.advertisedHost` to the address external clients should use. The proxy is
 the single Kafka entrypoint and supports broker scaling without client
 reconfiguration. For production, use `proxy.service.type=LoadBalancer`. For
-local clusters (kind), pin `proxy.service.nodePort` — see
+local clusters (kind), pin `proxy.service.nodePort`; see
 `deploy/helm/kafscale/README.md`.
 
 **Optional:** broker Services are created by the operator. To expose brokers

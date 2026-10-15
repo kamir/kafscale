@@ -53,7 +53,7 @@ const (
 // lfsModule encapsulates LFS functionality as a feature-flagged module
 // inside the existing proxy. When enabled, it intercepts produce requests
 // to detect LFS_BLOB headers, uploads payloads to S3, and replaces record
-// values with JSON envelopes — all before the existing partition-aware fan-out.
+// values with JSON envelopes, all before the existing partition-aware fan-out.
 type lfsModule struct {
 	logger               *slog.Logger
 	s3Uploader           *s3Uploader
@@ -113,7 +113,7 @@ func initLFSModule(ctx context.Context, logger *slog.Logger) (*lfsModule, error)
 	}
 	for _, blocked := range blockedBucketNames {
 		if s3Bucket == blocked {
-			return nil, fmt.Errorf("KAFSCALE_LFS_PROXY_S3_BUCKET=%q is a known unsafe example name and must not be used — configure your own bucket", blocked)
+			return nil, fmt.Errorf("KAFSCALE_LFS_PROXY_S3_BUCKET=%q is a known unsafe example name and must not be used; configure your own bucket", blocked)
 		}
 	}
 	s3Region := strings.TrimSpace(os.Getenv("KAFSCALE_LFS_PROXY_S3_REGION"))
@@ -258,7 +258,7 @@ func initLFSModule(ctx context.Context, logger *slog.Logger) (*lfsModule, error)
 	m.startS3HealthCheck(ctx, s3HealthInterval)
 
 	if m.presignEnabled {
-		m.logger.Warn("presign download mode is ENABLED — LFS downloads in presign mode bypass server-side integrity verification. Clients must verify payloads against the envelope checksum. Bare consumption of presigned URLs (e.g. curl) opts out of tamper detection.",
+		m.logger.Warn("presign download mode is ENABLED: LFS downloads in presign mode bypass server-side integrity verification. Clients must verify payloads against the envelope checksum. Bare consumption of presigned URLs (e.g. curl) opts out of tamper detection.",
 			"flag", "KAFSCALE_LFS_PROXY_PRESIGN_ENABLED")
 		go m.runPresignWarningLoop(ctx)
 	}
@@ -277,7 +277,7 @@ func (m *lfsModule) runPresignWarningLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.logger.Warn("presign download mode is ENABLED — clients must verify payloads against envelope checksum",
+			m.logger.Warn("presign download mode is ENABLED: clients must verify payloads against envelope checksum",
 				"flag", "KAFSCALE_LFS_PROXY_PRESIGN_ENABLED")
 		}
 	}
@@ -285,7 +285,7 @@ func (m *lfsModule) runPresignWarningLoop(ctx context.Context) {
 
 // rewriteProduceRequest is the integration point called from handleProduceRouting.
 // It scans produce records for LFS_BLOB headers, uploads blobs to S3, and
-// replaces record values with LFS envelope JSON — all in-place on the parsed
+// replaces record values with LFS envelope JSON, all in-place on the parsed
 // ProduceRequest struct. Returns true if any records were rewritten, along with
 // orphan candidates (S3 objects that should be tracked if the downstream Kafka
 // produce fails).

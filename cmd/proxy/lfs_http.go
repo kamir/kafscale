@@ -440,7 +440,7 @@ func (m *lfsModule) handleHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The consumer's Kafka envelope is the authoritative source of the
-	// checksum. The proxy refuses to serve an object without one — S3 is
+	// checksum. The proxy refuses to serve an object without one: S3 is
 	// treated as untrusted storage.
 	if req.Integrity == nil || strings.TrimSpace(req.Integrity.SHA256) == "" {
 		m.lfsWriteHTTPError(w, requestID, "", http.StatusBadRequest, "missing_integrity",
@@ -474,7 +474,7 @@ func (m *lfsModule) handleHTTPDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	// Size is required for stream mode because the proxy enforces a hard byte
 	// cap on the S3 read (defense against attacker-extended payloads from a
-	// compromised bucket). Presign mode can do without — the URL it returns
+	// compromised bucket). Presign mode can do without: the URL it returns
 	// carries no proxy-side byte transfer.
 	if mode == "stream" && req.Integrity.Size <= 0 {
 		m.lfsWriteHTTPError(w, requestID, "", http.StatusBadRequest, "missing_integrity_size",
@@ -547,7 +547,7 @@ func (m *lfsModule) handleHTTPDownload(w http.ResponseWriter, r *http.Request) {
 // streamDownloadWithVerify fetches the S3 object, buffers it to a temporary
 // file while computing SHA-256, and only begins streaming to the client if
 // the hash matches the envelope checksum. On mismatch (or oversize) the
-// handler returns 502 with a structured error JSON — no tampered bytes ever
+// handler returns 502 with a structured error JSON; no tampered bytes ever
 // reach the client.
 //
 // This is intentionally NOT a stream-and-verify-at-end design. An earlier
@@ -623,7 +623,7 @@ func (m *lfsModule) streamDownloadWithVerify(r *http.Request, w http.ResponseWri
 	}
 
 	if written > expectedSize {
-		m.logger.Error("LFS download size exceeded envelope — possible bucket compromise",
+		m.logger.Error("LFS download size exceeded envelope, possible bucket compromise",
 			"bucket", logSafe(bucket), "key", logSafe(key), "expected_size", expectedSize, "read_at_least", written)
 		m.tracker.EmitDownloadIntegrityFailed(requestID, bucket, key, "stream", "sha256", expectedSHA, "", written, expectedSize)
 		m.lfsWriteHTTPError(w, requestID, "", http.StatusBadGateway, "integrity_failure",
@@ -633,7 +633,7 @@ func (m *lfsModule) streamDownloadWithVerify(r *http.Request, w http.ResponseWri
 
 	actualSHA := hex.EncodeToString(hasher.Sum(nil))
 	if actualSHA != expectedSHA {
-		m.logger.Error("LFS download integrity check FAILED — S3 bytes do not match Kafka envelope checksum",
+		m.logger.Error("LFS download integrity check FAILED: S3 bytes do not match Kafka envelope checksum",
 			"bucket", logSafe(bucket), "key", logSafe(key),
 			"expected_sha256", logSafe(expectedSHA), "actual_sha256", actualSHA,
 			"bytes_read", written)
@@ -643,7 +643,7 @@ func (m *lfsModule) streamDownloadWithVerify(r *http.Request, w http.ResponseWri
 		return
 	}
 
-	// Verified. Stream the temp file to the client with Content-Length set —
+	// Verified. Stream the temp file to the client with Content-Length set:
 	// the bytes are now provably authentic, so a complete Content-Length-N
 	// response is correct.
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
