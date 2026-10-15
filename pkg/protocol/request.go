@@ -22,7 +22,7 @@ import (
 )
 
 // RequestHeader carries the parsed Kafka request header fields.
-// kmsg does not handle headers — they must be parsed/written manually.
+// kmsg does not handle headers; they must be parsed/written manually.
 type RequestHeader struct {
 	APIKey        int16
 	APIVersion    int16

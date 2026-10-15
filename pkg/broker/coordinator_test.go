@@ -235,7 +235,7 @@ func TestGroupState_RebalanceLifecycle(t *testing.T) {
 		}
 	}
 
-	// completeIfReady should return false — no members have joined this generation.
+	// completeIfReady should return false: no members have joined this generation.
 	if state.completeIfReady() {
 		t.Fatal("expected completeIfReady=false before members join")
 	}

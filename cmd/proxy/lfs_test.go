@@ -239,7 +239,7 @@ func TestNilLFSModuleZeroOverhead(t *testing.T) {
 	p := &proxy{
 		lfs: nil,
 	}
-	// Accessing p.lfs should be nil — the check in handleProduceRouting
+	// Accessing p.lfs should be nil: the check in handleProduceRouting
 	// is simply `if p.lfs != nil`, which is a zero-cost nil pointer check.
 	if p.lfs != nil {
 		t.Fatal("expected nil lfs module")

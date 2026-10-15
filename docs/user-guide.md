@@ -158,7 +158,7 @@ The operator uses Kubernetes HPA and the BrokerControl gRPC API to safely drain 
 
 ## Limits / Non-Goals
 
-- No embedded stream processing features—pair Kafscale with Flink, Wayang, Spark, etc.
+- No embedded stream processing features; pair Kafscale with Flink, Wayang, Spark, etc.
 - Transactions, idempotent producers, and log compaction are out of scope for KafScale.
 
 For deployment and operations, read `docs/operations.md`.

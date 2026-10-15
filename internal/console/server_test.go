@@ -351,7 +351,7 @@ func TestWriteJSONEncodeError(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		// The json.Encoder writes directly to the ResponseWriter,
 		// so it may have already written the header as 200.
-		// That's OK — we're just covering the code path.
+		// That's OK, we're just covering the code path.
 		_ = w.Code
 	}
 }

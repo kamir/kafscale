@@ -36,7 +36,7 @@ var (
 
 	// ErrShuttingDown is returned when a lease acquisition is attempted after
 	// ReleaseAll has been called. Callers should treat this the same as
-	// ErrNotOwner — the broker is draining and should not accept new writes.
+	// ErrNotOwner: the broker is draining and should not accept new writes.
 	ErrShuttingDown = errors.New("lease manager is shut down")
 )
 

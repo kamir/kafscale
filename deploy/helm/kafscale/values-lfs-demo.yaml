@@ -19,7 +19,7 @@
 # This values file enables the LFS browser demo UI (lfsDemos).
 #
 # LFS itself is configured on your KafscaleCluster CRD (spec.lfsProxy), not via
-# Helm lfsProxy values — see deploy/helm/kafscale/README.md.
+# Helm lfsProxy values: see deploy/helm/kafscale/README.md.
 #
 # Usage:
 #   helm upgrade --install kafscale ./deploy/helm/kafscale \
