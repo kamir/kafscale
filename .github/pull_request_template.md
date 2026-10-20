@@ -21,12 +21,15 @@ limitations under the License.
 
 ## Testing
 
+- [ ] `make commit-check`
 - [ ] `go test ./...`
 - [ ] `make test-produce-consume` (broker changes)
 - [ ] `make test-consumer-group` (group changes)
 
 ## Checklist
 
+- [ ] Followed AGENTS.md and DOCS.md
+- [ ] Bug fix or behavior change: added a regression test that fails on main and passes with this change
 - [ ] Added/updated unit tests for new logic
 - [ ] Added/updated e2e coverage for bug fixes
 - [ ] Added license headers to new files
