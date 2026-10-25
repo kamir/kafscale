@@ -168,6 +168,17 @@ func (c *GroupCoordinator) JoinGroup(ctx context.Context, req *kmsg.JoinGroupReq
 		state.bumpRebalanceDeadline(timeout)
 	}
 
+	if req.Version >= 4 && req.MemberID == "" {
+		resp := kmsg.NewPtrJoinGroupResponse()
+		resp.ErrorCode = protocol.MEMBER_ID_REQUIRED
+		resp.MemberID = memberID
+		if err := c.persistGroupLocked(ctx, req.Group, state); err != nil {
+			resp.ErrorCode = protocol.UNKNOWN_SERVER_ERROR
+		}
+		c.mu.Unlock()
+		return resp, nil
+	}
+
 	member.joinGeneration = state.generationID
 	if state.leaderID == "" {
 		state.ensureLeader()
@@ -305,6 +316,21 @@ func (c *GroupCoordinator) Heartbeat(ctx context.Context, req *kmsg.HeartbeatReq
 }
 
 func (c *GroupCoordinator) LeaveGroup(ctx context.Context, req *kmsg.LeaveGroupRequest) *kmsg.LeaveGroupResponse {
+	if req.Version >= 3 {
+		response := kmsg.NewPtrLeaveGroupResponse()
+		for _, member := range req.Members {
+			legacy := kmsg.NewPtrLeaveGroupRequest()
+			legacy.Group = req.Group
+			legacy.MemberID = member.MemberID
+			result := c.LeaveGroup(ctx, legacy)
+			entry := kmsg.NewLeaveGroupResponseMember()
+			entry.MemberID = member.MemberID
+			entry.InstanceID = member.InstanceID
+			entry.ErrorCode = result.ErrorCode
+			response.Members = append(response.Members, entry)
+		}
+		return response
+	}
 	c.mu.Lock()
 	state, err := c.loadGroupIfMissing(ctx, req.Group)
 

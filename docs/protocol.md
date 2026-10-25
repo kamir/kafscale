@@ -45,6 +45,10 @@ Kafscale implements a focused subset of the Kafka protocol. Versions below refle
 | 37 | CreatePartitions | 0-3 | Scale partitions |
 | 42 | DeleteGroups | 0-2 | Consumer group cleanup |
 
+## Consumer group membership
+
+JoinGroup v4 allocates a member identity with `MEMBER_ID_REQUIRED` when the request has an empty member ID. Retry with the returned identity to join the group. LeaveGroup v4 reads the member list and returns a result for each listed member.
+
 ## Explicitly Unsupported
 
 | API Key | Name | Reason |
